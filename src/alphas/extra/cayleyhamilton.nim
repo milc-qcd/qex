@@ -7,6 +7,8 @@ getOptimPragmas()
 
 proc eigs3(e0,e1,e2: var auto; tr,p2,det: auto; eps: float) {.alwaysInline.} =
   mixin sin,cos,acos
+  var veps {.noinit.}: type(e0)
+  var vzero {.noinit.}: type(e0)
   let tr3 = (1.0/3.0)*tr
   let p23 = (1.0/3.0)*p2
   let tr32 = tr3*tr3
@@ -34,11 +36,17 @@ proc eigs3(e0,e1,e2: var auto; tr,p2,det: auto; eps: float) {.alwaysInline.} =
   e2 = ll - sqs
 
   # 02/19/2026: implement cutoff in eigenvalue
-  var veps {.noinit.}: type(e0)
+  # 03/02/2026: implement per-site cutoff in eigenvalue
+  e0 = abs(e0)
+  e1 = abs(e1)
+  e2 = abs(e2)
   veps := eps
-  e0 = max(abs(e0), veps)
-  e1 = max(abs(e1), veps)
-  e2 = max(abs(e2), veps)
+  vzero := 0.0
+  let emin = min(e0, min(e1, e2))
+  let shift = max(veps - emin, vzero)
+  e0 += shift
+  e1 += shift
+  e2 += shift
 
 template rsqrtPHM2(r:typed; x:typed) =
   let x00 = x[0,0].re
@@ -56,9 +64,9 @@ template rsqrtPHM2(r:typed; x:typed) =
 proc rsqrtPHM3f(c0,c1,c2:var auto; tr,p2,det:auto; eps:float) {.alwaysInline.} =
   var l0,l1,l2 {.noInit.}: type(tr)
   eigs3(l0,l1,l2,tr,p2,det,eps)
-  let sl0 = sqrt(abs(l0))
-  let sl1 = sqrt(abs(l1))
-  let sl2 = sqrt(abs(l2))
+  let sl0 = sqrt(l0)
+  let sl1 = sqrt(l1)
+  let sl2 = sqrt(l2)
   let u = sl0 + sl1 + sl2
   let w = sl0 * sl1 * sl2
   let d = w*(sl0+sl1)*(sl0+sl2)*(sl1+sl2)
