@@ -790,6 +790,8 @@ proc fermionForce[S,T](
         f3[mu][i] *= -1
 
   # 3. smearing
+  threads:
+    for mu in 0..<ff.len: ff[mu] := 0
   ff.smearedForce(f1, f3)
 
   # 4. Tₐ ReTr( Tₐ U F† )
@@ -941,6 +943,10 @@ template finish*(self: var HisqHMC; trajectory: int; input: untyped) =
       echo ""
       echo "end reversibility check"
       echo ""
+
+    # reverse() clobbers su/sul with reversed smeared links;
+    # re-smear so subsequent measurements use the correct links
+    self.smear()
 
   # Do metropolis & have user do what they will
   case accepted:
