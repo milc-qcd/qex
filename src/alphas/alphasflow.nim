@@ -2,6 +2,7 @@ import qex
 import alphas
 
 import std/[json, strutils, sequtils]
+from std/math import round
 
 const
   banner = """
@@ -20,11 +21,6 @@ const
  Cite: Proceedings of Science (PoS) LATTICE2016 (2017) 271
 |-----------------------------------------------------------------------|
 """
-
-import alphas
-
-import std/[strutils]
-from std/math import round
 
 let # defaults for testing/regression
   defaultLat = @[8, 8, 8, 16]
@@ -56,14 +52,14 @@ let # defaults for testing/regression
 const CrSymanzik = -1.0/12.0
 
 type
-  GradientFlowKind = enum 
+  GradientFlowKind* = enum 
     WilsonFlow, 
     RectangleFlow, 
     IwasakiFlow, 
     DBW2Flow, 
     SymanzikFlow,
     ZeuthenFlow
-  MeasurementKind = enum 
+  MeasurementKind* = enum 
     Plaquette, 
     Clover, 
     Rectangle,
@@ -75,7 +71,7 @@ type
     sf, sb: seq[Transporter[U,U,U0]]
 
 type
-  GradientFlow[U,U0] = object
+  GradientFlow*[U,U0] = object
     case kind: GradientFlowKind
       of ZeuthenFlow: 
         lap*: Laplacian[U,U0]
@@ -85,11 +81,12 @@ type
     u*: seq[U]
     step*: int
     flowTime*: float
+    log*: bool
     logFile*: File
 
 #[ constructors ]#
 
-converter strToGradientFlowKind(str: string): GradientFlowKind =
+converter strToGradientFlowKind*(str: string): GradientFlowKind =
   case str: # I'm only dealing with these flows at the moment
     of "wilsonflow", "WilsonFlow", "wilson", "Wilson": WilsonFlow
     of "symanzikflow", "SymanzikFlow", "symanzik", "Symanzik": SymanzikFlow
@@ -98,7 +95,7 @@ converter strToGradientFlowKind(str: string): GradientFlowKind =
       qexError "unsupported flow kind: " & str
       WilsonFlow
 
-converter strToMeasurementKind(str: string): MeasurementKind =
+converter strToMeasurementKind*(str: string): MeasurementKind =
   case str:
     of "plaquette", "Plaquette", "plaq", "Plaq": Plaquette
     of "clover", "Clover", "clov", "Clov": Clover
@@ -116,7 +113,7 @@ proc newLaplacian[U](u: openArray[U]): auto =
     sb: u.newTransporters(u[0], -1)
   )
 
-proc newGradientFlow[U](
+proc newGradientFlow*[U](
   u: seq[U]; 
   kind: GradientFlowKind;
   plaq: float = 1.0;
@@ -127,10 +124,11 @@ proc newGradientFlow[U](
     Clover, 
     Topology, 
     Polyakov
-  ]
+  ];
+  log: bool = true
 ): auto =
   type U0 = evalType(u[0][0])
-  result = GradientFlow[U,U0](kind: kind, meas: meas, u: u.newOneOf())
+  result = GradientFlow[U,U0](kind: kind, meas: meas, u: u.newOneOf(), log: log)
   result.gc = case result.kind
     of WilsonFlow: GaugeActionCoeffs(plaq: plaq)
     of RectangleFlow: gaugeActRect(plaq, rect)
@@ -144,10 +142,11 @@ proc newGradientFlow[U](
 #[ main gradient flow templates/procedures ]#
 
 template ioBlock(flow: var GradientFlow; filename: string; body: untyped): untyped =
-  if flow.logFile.isNil: flow.logFile = filename.open(fmWrite)
-  else: qexError "log file already opened"
-  body
-  if not flow.logFile.isNil: flow.logFile.close()
+  if flow.log:
+    if flow.logFile.isNil: flow.logFile = filename.open(fmWrite)
+    else: qexError "log file already opened"
+    body
+    if not flow.logFile.isNil: flow.logFile.close()
 
 template gradient[U](flow: var GradientFlow; f: var seq[U]; u: seq[U]) =
   let nd = u[0].l.nDim
@@ -163,7 +162,8 @@ template gradient[U](flow: var GradientFlow; f: var seq[U]; u: seq[U]) =
         sb = flow.lap.sb
       var ft = f.newOneOf()
       threads:
-        ft := f
+        for mu in 0..<nd:
+          ft[mu] := f[mu]
         threadBarrier()
         for mu in 0..<nd:
           f[mu] += coeff*(sf[mu]^*ft[mu] + sb[mu]^*ft[mu] - 2.0*ft[mu])
@@ -174,7 +174,7 @@ proc isIn(meas: MeasurementKind, ms: seq[MeasurementKind]): bool =
     if meas == m: return true
   return false
 
-template measurements[U,U0](flow: var GradientFlow[U,U0]; u: seq[U]): untyped =
+template measurements*[U,U0](flow: var GradientFlow[U,U0]; u: seq[U]): untyped =
   let prec = 18
   let 
     nc = u[0][0].nrows
@@ -221,10 +221,10 @@ template measurements[U,U0](flow: var GradientFlow[U,U0]; u: seq[U]): untyped =
         output.add plt.im().formatFloat(ffDecimal, prec)
       of Topology: output.add fmunu.topoQ().formatFloat(ffDecimal, prec)
   let outputStr = output.join(" ") & "\n"
-  flow.logFile.write(outputStr)
+  if flow.log: flow.logFile.write(outputStr)
   echo outputStr.replace("FLOW", $flow.kind)
 
-template gradientFlow[U,U0](flow: var GradientFlow[U,U0]; steps: int; eps: float) = 
+template gradientFlow*[U,U0](flow: var GradientFlow[U,U0]; steps: int; eps: float) = 
   ## Gradient flow
   ## Originally written by James Osborn & Xiaoyong Jin.
   ## d/dt Vt = Z(Vt) Vt
@@ -245,7 +245,8 @@ template gradientFlow[U,U0](flow: var GradientFlow[U,U0]; steps: int; eps: float
   var u = flow.u.newOneOf()
   
   # gradient flow evolution and measurements
-  threads: u := flow.u
+  threads:
+    for mu in 0..<u.len: u[mu] := flow.u[mu]
   while true: # arXiv:1006.4518
     flow.gradient(f, u)
     threads:
@@ -278,13 +279,14 @@ template gradientFlow[U,U0](flow: var GradientFlow[U,U0]; steps: int; eps: float
     flow.flowTime += eps
     flow.measurements(u)
     if n > (steps - 1): 
-      threads: flow.u := u
+      threads:
+        for mu in 0..<u.len: flow.u[mu] := u[mu]
       break
 
 when isMainModule:
   echo banner
 
-  proc getMeasurements(self: JsonNode): seq[MeasurementKind] =
+  proc getMeasurements*(self: JsonNode): seq[MeasurementKind] =
     result = newSeq[MeasurementKind]()
     if self.hasKey("measurements"):
       for m in self["measurements"].items: 
@@ -352,7 +354,8 @@ when isMainModule:
     if stepSizes.len != transitions:
       qexError "number of step sizes must match number of transition flow times"
     flowObject.ioBlock(outputFilename):
-      threads: flowObject.u := u
+      threads:
+        for mu in 0..<u.len: flowObject.u[mu] := u[mu]
       flowObject.measurements(u) # t/a^2 = 0.0 measurement
       for transition in 0..<transitions:
         let 
