@@ -58,7 +58,7 @@ proc condensate(hmc: auto) =
       threadMaster: echo "MEASpbp (",source,") mass: ",mass," pbpe: ",pbpe," pbpo: ",pbpo
 
 # Construct HMC object
-var hmc = newHisqHMC:
+var hmc = newAlphasHMC:
   # Gauge link update
   proc mdt(dtau: float) = hisq.updateGauge(dtau)
 

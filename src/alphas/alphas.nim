@@ -4,7 +4,7 @@
 ## Author: James C. Osborn
 ## 
 ## Details:
-## This is a copy of examples/hisqhmc_h.nim with added utilities for alphas
+## This is a copy of examples/AlphasHMC_h.nim with added utilities for alphas
 ## 
 ## HISQ HMC with Hasenbusch preconditioning. Note that this specific code
 ## does not come with support for rooting. Additionally, the tadpole 
@@ -18,7 +18,7 @@
 ## for an example of how to deploy it for your purposes. 
 ## 
 ## Information is specified to program by input flags and a JSON file. See
-## "newHISQHMC" input flags and "defaultInputs" for an example of what goes 
+## "newAlphasHMC" input flags and "defaultInputs" for an example of what goes 
 ## into the JSON file.
 
 import io
@@ -29,7 +29,11 @@ import gauge/[gaugeUtils]
 import algorithms/[integrator]
 import physics/[qcdTypes, stagSolve]
 
-import alphashisq
+when defined(AlphasHYP):
+  import alphashyp
+else:
+  import alphashisq
+
 import extra/[alphasproject, alphasrng, alphasnorm]
 
 import mdevolve
@@ -85,7 +89,7 @@ const
   Cr = -1.0/20.0
 
 let 
-  ## Brief: default inputs -- overriden if path to JSON provided (see newHISQHMC)
+  ## Brief: default inputs -- overriden if path to JSON provided (see newAlphasHMC)
   defaultInputs = %* {
     "lattice-geometry": [8,8,8,16], # lattice geometry
     #"rank-geometry": [2,2,1,1], # MPI rank geometry -- if not specified, guessed
@@ -101,7 +105,7 @@ let
       "parallel-seed": 123456789, # heatbath RNG seed
       "gauge-start": "cold" # start -- hot, cold, or read; 
                             # if "read", must run with --ensemble flag 
-                            # (see newHISQHMC)
+                            # (see newAlphasHMC)
     },
     "action": {
       "beta": 7.5, # bare gauge coupling
@@ -115,7 +119,10 @@ let
                                      # only available for Cayley-Hamilton
         #"eps": 1e-16, # terminating criterion - if needed but not provided, guessed
         #"maxiters": 100 # max iter criterion - if needed but not provided, guessed
-      }
+      },
+      "alpha1": 0.4, # <-+
+      "alpha2": 0.5, #   |
+      "alpha3": 0.5  # <-+- HYP coeffs when HYP smearing used
     },
     "gauge": {
       "integrator": "2MN", # inner gauge integrator (2nd-order Omelyan)
@@ -136,7 +143,7 @@ let
 
 #[ Specify types used for HMC ]#
 
-# hisqhmc_h able to use different RNGs: here, we just use MILC's
+# AlphasHMC_h able to use different RNGs: here, we just use MILC's
 type
   RNGType = enum MILC
   RNGRoot {.inheritable.} = object
@@ -148,7 +155,7 @@ type
     milc: MilcRngv6
 
 type
-  HisqHMCRoot[U] {.inheritable.} = object of RootObj
+  AlphasHMCRoot[U] {.inheritable.} = object of RootObj
     tau: float
     hi,hf: float
     baseFilename: string
@@ -157,16 +164,22 @@ type
     srng: SerialRNG
     prng: ParallelRNG
     p,f: seq[U]
-  HisqHMC*[U,F,F0] = ref object of HisqHMCRoot[U]
+  AlphasHMC*[U,F,F0] = ref object of AlphasHMCRoot[U]
     beta,mass,hmass: float
     bcs: string
     u,u0: seq[U]
-    su,sul: seq[U]
+    su: seq[U]
+    when defined(AlphasHYP): discard
+    else: 
+      sul: seq[U]
     phi,hphi: F
     psi,hpsi: F
     gc: GaugeActionCoeffs
     stag: Staggered[U,F0]
-    params: HisqCoefs
+    when defined(AlphasHYP):
+      params: HypCoefs
+    else:
+      params: HisqCoefs
     spa*,spf*: SolverParams
     perf: PerfInfo
     jsonInfo*: JsonNode
@@ -232,7 +245,7 @@ proc newSerialRNG*(generator: string; seed: int): SerialRng =
   new(result, generator, uint64(seed))
   seed(result)
 
-#[ For construction of HisqHMC object ]#
+#[ For construction of AlphasHMC object ]#
 
 proc readJSON*(fn: string): JsonNode = fn.parseFile
 
@@ -269,37 +282,48 @@ proc newSolverParams(info: JsonNode; af: string): auto =
       of false: (if af == "action": ActionCGVerbosity else: ForceCGVerbosity)
   return newSolverParams(r2, maxits, verbosity)
 
-proc newHISQ[T](u: seq[T]; info: JsonNode): auto = 
-  var 
-    projection: ProjectionMethod
-    eps = epsilon(u[0][0][].norm2.simdSum)
-    maxiters = 100
-    delta = DefaultForceCutoff
-  case info["action"].hasKey("unitary-projection"):
-    of true:
-      if info["action"]["unitary-projection"].hasKey("method"):
-        projection = case info["action"]["unitary-projection"]["method"].getStr()
-          of "cayley-hamilton": CayleyHamilton
-          of "newton": Newton
-          of "halley": Halley
-          else: 
-            qexError("Invalid choice for reunitarization method")
-            defUnitProj
-      if info["action"]["unitary-projection"].hasKey("eps"):
-        eps = info["action"]["unitary-projection"]["eps"].getFloat()
-      if info["action"]["unitary-projection"].hasKey("maxiters"):
-        maxiters = info["action"]["unitary-projection"]["maxiters"].getInt()
-      if info["action"]["unitary-projection"].hasKey("delta"):
-        delta = info["action"]["unitary-projection"]["delta"].getFloat()
-    of false: projection = defUnitProj
-  return newHISQ(
-    info["action"]["lepage"].getFloat(),
-    info["action"]["naik"].getFloat(),
-    reunitMethod = projection,
-    reunitEps = eps,
-    reunitMaxiters = maxiters,
-    delta = delta
-  )
+when defined(AlphasHYP): 
+  proc newHYP(info: JsonNode): HypCoefs =
+    var alpha1, alpha2, alpha3: float
+    if info["action"].hasKey("alpha1"): alpha1 = info["action"]["alpha1"].getFloat()
+    else: alpha1 = 0.4
+    if info["action"].hasKey("alpha2"): alpha2 = info["action"]["alpha2"].getFloat()
+    else: alpha2 = 0.5
+    if info["action"].hasKey("alpha3"): alpha3 = info["action"]["alpha3"].getFloat()
+    else: alpha3 = 0.5
+    return newHYP(alpha1, alpha2, alpha3)
+else:
+  proc newHISQ[T](u: seq[T]; info: JsonNode): auto = 
+    var 
+      projection: ProjectionMethod
+      eps = epsilon(u[0][0][].norm2.simdSum)
+      maxiters = 100
+      delta = DefaultForceCutoff
+    case info["action"].hasKey("unitary-projection"):
+      of true:
+        if info["action"]["unitary-projection"].hasKey("method"):
+          projection = case info["action"]["unitary-projection"]["method"].getStr()
+            of "cayley-hamilton": CayleyHamilton
+            of "newton": Newton
+            of "halley": Halley
+            else: 
+              qexError("Invalid choice for reunitarization method")
+              defUnitProj
+        if info["action"]["unitary-projection"].hasKey("eps"):
+          eps = info["action"]["unitary-projection"]["eps"].getFloat()
+        if info["action"]["unitary-projection"].hasKey("maxiters"):
+          maxiters = info["action"]["unitary-projection"]["maxiters"].getInt()
+        if info["action"]["unitary-projection"].hasKey("delta"):
+          delta = info["action"]["unitary-projection"]["delta"].getFloat()
+      of false: projection = defUnitProj
+    return newHISQ(
+      info["action"]["lepage"].getFloat(),
+      info["action"]["naik"].getFloat(),
+      reunitMethod = projection,
+      reunitEps = eps,
+      reunitMaxiters = maxiters,
+      delta = delta
+    )
 
 proc newSerialRNG(info: JsonNode): auto =
   return newSerialRNG(
@@ -319,12 +343,12 @@ proc readGauge*(u: auto; fn: string) =
     else: discard
   else: qexError fn & " does not exist"
 
-proc readGauge*(self: var HisqHMC; fn: string) = self.u.readGauge(fn)
+proc readGauge*(self: var AlphasHMC; fn: string) = self.u.readGauge(fn)
 
 proc writeGauge[T](u: T; fn: string) =
   if 0 != u.saveGauge(fn): qexError "unable to write " & fn
 
-proc writeGauge*(self: var HisqHMC; fn: string) = self.u.writeGauge(fn)
+proc writeGauge*(self: var AlphasHMC; fn: string) = self.u.writeGauge(fn)
 
 proc getIntSeq*(input: JsonNode): seq[int] = 
   result = newSeq[int]()
@@ -334,18 +358,18 @@ proc getFloatSeq*(input: JsonNode): seq[float] =
   result = newSeq[float]()
   for elem in input.getElems(): result.add elem.getFloat()
 
-proc readSerialRNG*(self: var HisqHMC; fn: string) = 
+proc readSerialRNG*(self: var AlphasHMC; fn: string) = 
   self.srng.readRNG(fn)
   echo "read serial RNG file: " & fn
 
-proc readParallelRNG*(self: var HisqHMC; fn: string) = 
+proc readParallelRNG*(self: var AlphasHMC; fn: string) = 
   self.prng.readRNG(fn)
   echo "read parallel RNG file: " & fn
 
 proc setIntegrator(info: JsonNode; field: string): IntegratorProc =
   result = toIntegratorProc(info[field]["integrator"].getStr())
 
-proc `$`*(self: HisqHMC): string =
+proc `$`*(self: AlphasHMC): string =
   let
     params = (
       trajectory_length: self.tau,
@@ -397,8 +421,10 @@ proc `$`*(self: HisqHMC): string =
       let proj = self.jsonInfo["action"]["unitary-projection"]["method"].getStr()
       result &= "unitary projection method: " & proj & "\n"
   else: result &= "unitary projection method: " & defUnitProjStr & "\n"
-  if self.params.projection.policy == CayleyHamilton:
-    result &= "unitary projection force cutoff: " & $self.params.projection.delta & "\n"
+  when defined(AlphasHYP): discard
+  else:
+    if self.params.projection.policy == CayleyHamilton:
+      result &= "unitary projection force cutoff: " & $self.params.projection.delta & "\n"
   result &= "minimum squared residual (action CG solver): " & $self.spa.r2req & "\n"
   result &= "maximum iterations (action CG solver): " & $self.spa.maxits & "\n"
   result &= "minimum squared residual (force CG solver): " & $self.spf.r2req & "\n"
@@ -412,7 +438,7 @@ proc `$`*(self: HisqHMC): string =
   result &= $(self.integrator)
   result &= "\n"
 
-template newHisqHMC*(build: untyped): auto =
+template newAlphasHMC*(build: untyped): auto =
   ## Brief: HISQ HMC constructor template
   ## Details:
   ## Any program using this to construct the HISQ HMC object
@@ -456,7 +482,7 @@ template newHisqHMC*(build: untyped): auto =
   # modifiable variables inject to caller's template call
   var 
     integrator {.inject.}: Integrator
-    hisq {.inject.} = HisqHMC[lo.UU,lo.FF,lo.FF0]()
+    hisq {.inject.} = AlphasHMC[lo.UU,lo.FF,lo.FF0]()
 
   # Prepare HMC
   (
@@ -484,7 +510,6 @@ template newHisqHMC*(build: untyped): auto =
     hisq.mass,
     hisq.hmass,
     hisq.bcs,
-    hisq.params,
     hisq.spa,
     hisq.spf,
     hisq.gc
@@ -493,24 +518,24 @@ template newHisqHMC*(build: untyped): auto =
     info["action"]["mass"].getFloat(),
     info["action"]["hasenbusch-mass"].getFloat(),
     "pppa",
-    hisq.p.newHISQ(info),
     newSolverParams(info,"action"),
     newSolverParams(info,"force"),
     GaugeActionCoeffs(plaq: beta*Cp, rect: beta*Cr)
   )
+
+  when defined(AlphasHYP): hisq.params = info.newHYP()
+  else: hisq.params = hisq.p.newHISQ(info)
   
   # Prepare fields
   (
     hisq.u,
     hisq.u0,
     hisq.su,
-    hisq.sul,
     hisq.phi,
     hisq.hphi,
     hisq.psi,
     hisq.hpsi
   ) = (
-    lo.newGauge(),
     lo.newGauge(),
     lo.newGauge(),
     lo.newGauge(),
@@ -525,7 +550,11 @@ template newHisqHMC*(build: untyped): auto =
       hisq.prng.random(hisq.u) 
       hisq.u.reunit()
     else: discard
-  hisq.stag = newStag3(hisq.su, hisq.sul)
+  
+  when defined(AlphasHYP): hisq.stag = newStag(hisq.su)
+  else:
+    hisq.sul = lo.newGauge()
+    hisq.stag = newStag3(hisq.su, hisq.sul)
 
   # Execute user commands and return result
   template u: untyped {.inject.} = hisq.u
@@ -551,7 +580,7 @@ proc writeRNG(self: var SerialRNG; fn: string) =
   else: file.write(self.milc)
   file.flush
 
-proc writeSerialRNG*(self: var HisqHMC; fn: string) = self.srng.writeRNG(fn)
+proc writeSerialRNG*(self: var AlphasHMC; fn: string) = self.srng.writeRNG(fn)
 
 proc random*(self: var ParallelRNG; u: auto) = alphasrng.random(u, self.milc)
 
@@ -567,7 +596,7 @@ proc writeRNG(self: var ParallelRNG; filename: string) =
   writer.write(self.milc, recordMd)
   writer.close()
 
-proc writeParallelRNG*(self: var HisqHMC; fn: string) = self.prng.writeRNG(fn)
+proc writeParallelRNG*(self: var AlphasHMC; fn: string) = self.prng.writeRNG(fn)
 
 proc randomTAHGaussian(lu: auto; pRNG: auto) =
   threads:
@@ -592,25 +621,38 @@ template rephase(g: auto) =
   threadBarrier()
 
 proc smearRephase(
-  hisq: HisqCoefs; 
+  hisq: auto; 
   g: auto; 
   sg, sgl: auto;
   regulate: bool = false
 ): auto {.discardable.} =
-  let 
-    displayPerformance = case SmearingVerbosity
-      of 0: false
-      of 1: true
-      else: true
-  return hisq.smearGetForce(
+  let displayPerformance = case SmearingVerbosity
+    of 0: false
+    of 1: true
+    else: true
+  
+  when defined(AlphasHYP):
+    var perf: PerfInfo
+    result = hisq.smearGetForce(g, sg, perf)
+    threads: rephase(sg)
+    #if displayPerformance:
+    #  echo &"linkSmear: {perf.secs:.5f}s {1e-9*perf.flops/perf.secs:.3f}Gf/s"
+    #  perf.clear
+  else: return hisq.smearGetForce(
     g, sg, sgl, displayPerformance = displayPerformance, regulate = regulate
   )
 
-proc smear*(self: var HisqHMC) = 
-  discard self.params.smearRephase(self.u, self.su, self.sul)
+proc smear*(self: var AlphasHMC) = 
+  when defined(AlphasHYP): 
+    discard self.params.smearRephase(self.u, self.su, self.su)
+  else:
+    discard self.params.smearRephase(self.u, self.su, self.sul)
 
-proc smearGetForce*(self: var HisqHMC): auto =
-  return self.params.smearRephase(self.u, self.su, self.sul)
+proc smearGetForce*(self: var AlphasHMC): auto =
+  when defined(AlphasHYP): 
+    return self.params.smearRephase(self.u, self.su, self.su)
+  else:
+    return self.params.smearRephase(self.u, self.su, self.sul)
 
 #[ Hamiltonian calculation methods ]#
 
@@ -626,11 +668,11 @@ proc pnorm2[T](p: T): float =
 proc zeroFermion(phi: auto) =
   threads: phi := 0
 
-proc kineticAction*(self: HisqHMC): float = 0.5*self.p.pnorm2
+proc kineticAction*(self: AlphasHMC): float = 0.5*self.p.pnorm2
 
-proc gaugeAction*(self: HisqHMC): float = self.gc.gaugeActionOneLoopHISQ(self.u)
+proc gaugeAction*(self: AlphasHMC): float = self.gc.gaugeActionOneLoopHISQ(self.u)
 
-proc fermionAction*(self: HisqHMC): float =
+proc fermionAction*(self: AlphasHMC): float =
   var 
     hpsit = self.u[0].l.ColorVector()
     fact: float
@@ -646,7 +688,7 @@ proc fermionAction*(self: HisqHMC): float =
     threadMaster: fact = factt
   return 0.5*fact 
 
-proc hamiltonian*(self: HisqHMC): float =
+proc hamiltonian*(self: AlphasHMC): float =
   var h = (kinetic: 0.0, gauge: 0.0, fermion: 0.0)
   h.kinetic = self.kineticAction()
   h.gauge = self.gaugeAction()
@@ -677,16 +719,16 @@ proc pseudofermion(
     phi.odd := 0
     hphi.odd := 0
 
-proc momentumHeatbath*(self: var HisqHMC) = self.prng.randomTAHGaussian(self.p)
+proc momentumHeatbath*(self: var AlphasHMC) = self.prng.randomTAHGaussian(self.p)
 
-proc fermionHeatbath*(self: var HisqHMC) =
+proc fermionHeatbath*(self: var AlphasHMC) =
   self.prng.randomComplexGaussian(self.hpsi)
   self.prng.randomComplexGaussian(self.psi)
   self.stag.pseudofermion(
     self.phi, self.hphi, self.psi, self.hpsi, self.mass, self.hmass, self.spa
   )
 
-proc prepare*(self: var HisqHMC) =
+proc prepare*(self: var AlphasHMC) =
   self.backup()
   self.smear()
   self.momentumHeatbath()
@@ -699,10 +741,10 @@ proc set[T](g: auto; u: T) =
   threads:
     for mu in 0..<u.len: g[mu] := u[mu]
 
-proc backup(self: var HisqHMC) = set(self.u0,self.u)
-proc revert(self: var HisqHMC) = set(self.u,self.u0)
+proc backup(self: var AlphasHMC) = set(self.u0,self.u)
+proc revert(self: var AlphasHMC) = set(self.u,self.u0)
 
-proc evolve*(self: var HisqHMC) = 
+proc evolve*(self: var AlphasHMC) = 
   self.integrator.evolve(self.tau)
   self.integrator.finish
 
@@ -716,7 +758,7 @@ proc restore*(p0, p1: auto; u0, u1: auto) =
       p0[mu] := p1[mu]
       u0[mu] := u1[mu]
 
-proc reverse*(self: var HisqHMC): float = 
+proc reverse*(self: var AlphasHMC): float = 
   var u2 = self.u[0].l.newGauge()
   var p2 = self.u[0].l.newGauge()
 
@@ -745,10 +787,15 @@ proc fermionForce[S,T](
   # reverse accumulation of the derivative
   var
     f1 = f.newOneOf()
-    f3 = f.newOneOf()
     ff = f.newOneOf()
-    t,t3: array[4,Shifter[typeof(p),typeof(p[0])]]
-    ht,ht3: array[4,Shifter[typeof(hp),typeof(hp[0])]]
+    ht: array[4,Shifter[typeof(hp),typeof(hp[0])]]
+    t: array[4,Shifter[typeof(p),typeof(p[0])]]
+  
+  when defined(AlphasHYP): discard
+  else:
+    var f3 = f.newOneOf()
+    var ht3: array[4,Shifter[typeof(hp),typeof(hp[0])]]
+    var t3: array[4,Shifter[typeof(p),typeof(p[0])]]
 
   # Prepare shifts
   for mu in 0..<f.len:
@@ -759,10 +806,12 @@ proc fermionForce[S,T](
     discard ht[mu] ^* hp
 
     # Triple shift
-    t3[mu] = newShifter(p,mu,3)
-    ht3[mu] = newShifter(hp,mu,3)
-    discard t3[mu] ^* p
-    discard ht3[mu] ^* hp
+    when defined(AlphasHYP): discard
+    else:
+      t3[mu] = newShifter(p,mu,3)
+      ht3[mu] = newShifter(hp,mu,3)
+      discard t3[mu] ^* p
+      discard ht3[mu] ^* hp
 
   # 1. Dslash
   const n = p[0].len
@@ -772,34 +821,42 @@ proc fermionForce[S,T](
         forO a, 0, n-1:
           forO b, 0, n-1:
             f1[mu][i][a,b] := ffac * p[i][a] * t[mu].field[i][b].adj
-            f3[mu][i][a,b] := ffac * p[i][a] * t3[mu].field[i][b].adj
+            when defined(AlphasHYP): discard
+            else:
+              f3[mu][i][a,b] := ffac * p[i][a] * t3[mu].field[i][b].adj
     threadBarrier()  
     for mu in 0..<f.len:
       for i in f[mu]: # Hasenbusch fermion
         forO a, 0, n-1:
           forO b, 0, n-1:
             f1[mu][i][a,b] += hfac * hp[i][a] * ht[mu].field[i][b].adj
-            f3[mu][i][a,b] += hfac * hp[i][a] * ht3[mu].field[i][b].adj
+            when defined(AlphasHYP): discard
+            else:
+              f3[mu][i][a,b] += hfac * hp[i][a] * ht3[mu].field[i][b].adj
 
   # 2. correcting phase
   threads:
-    g.rephase
+    when defined(AlphasHYP): f1.rephase
+    else: g.rephase
     for mu in 0..<f.len:
       for i in f[mu].odd:
         f1[mu][i] *= -1
-        f3[mu][i] *= -1
+        when defined(AlphasHYP): discard
+        else: f3[mu][i] *= -1
 
   # 3. smearing
   threads:
     for mu in 0..<ff.len: ff[mu] := 0
-  ff.smearedForce(f1, f3)
+  when defined(AlphasHYP): ff.smearedForce(f1)
+  else: ff.smearedForce(f1, f3)
 
   # 4. Tₐ ReTr( Tₐ U F† )
   threads:
     for mu in 0..<f.len:
       for i in f[mu]: f1[mu][i] := ff[mu][i] * g[mu][i].adj
     threadBarrier()
-    g.rephase
+    when defined(AlphasHYP): discard
+    else: g.rephase
     for mu in 0..<f.len:
       for i in f[mu]: f[mu][i].projectTAH(f1[mu][i])
 
@@ -859,24 +916,29 @@ proc forceSolve[T](
   if sp0.verbosity>0: echo "stagSolve: ", sp.getStats
   sp0.addStats(sp)
 
-proc fermionForce*(self: var HisqHMC; dtau: float) =
-  let smearedForce = self.params.smearRephase(
-    self.u, self.su, self.sul, regulate = true
-  )
+proc fermionForce*(self: var AlphasHMC; dtau: float) =
+  when defined(AlphasHYP): 
+    let smearedForce = self.params.smearRephase(
+      self.u, self.su, self.su, regulate = true
+    )
+  else:
+    let smearedForce = self.params.smearRephase(
+      self.u, self.su, self.sul, regulate = true
+    )
   let ffac = 0.25*dtau
   let hfac = ffac*(self.hmass.sq-self.mass.sq)
   self.stag.forceSolve(self.psi, self.phi, self.hmass, self.spf)
   self.stag.forceSolve(self.hpsi, self.hphi, self.mass, self.spf)
   self.f.fermionForce(smearedForce, self.psi, self.hpsi, self.u, ffac, hfac)
 
-proc gaugeForce*(self: var HisqHMC) = self.gc.gaugeForceOneLoopHISQ(self.u, self.f)
+proc gaugeForce*(self: var AlphasHMC) = self.gc.gaugeForceOneLoopHISQ(self.u, self.f)
 
 proc updateGauge[T](u: auto; p: T; dtau: float) =
   threads:
     for mu in 0..<u.len:
       for s in u[mu]: u[mu][s] := exp(dtau*p[mu][s])*u[mu][s]
 
-proc updateGauge*(self: var HisqHMC; dtau: float) =
+proc updateGauge*(self: var AlphasHMC; dtau: float) =
   self.u.updateGauge(self.p,dtau)
   GC_fullCollect()
 
@@ -890,22 +952,22 @@ proc updateMomentum[T](p: auto; f: T) =
     for mu in 0..<f.len: p[mu] -= f[mu]
   GC_fullCollect()
 
-proc updateMomentum*(self: var HisqHMC; dtau: float) =
+proc updateMomentum*(self: var AlphasHMC; dtau: float) =
   self.p.updateMomentum(self.f,dtau)
 
-proc updateMomentum*(self: var HisqHMC) = self.p.updateMomentum(self.f)
+proc updateMomentum*(self: var AlphasHMC) = self.p.updateMomentum(self.f)
 
-proc updateMomentumFermion*(self: var HisqHMC; dtau: float) =
+proc updateMomentumFermion*(self: var AlphasHMC; dtau: float) =
   self.fermionForce(dtau)
   self.updateMomentum()
 
-proc updateMomentumGauge*(self: var HisqHMC; dtau: float) =
+proc updateMomentumGauge*(self: var AlphasHMC; dtau: float) =
   self.gaugeForce()
   self.updateMomentum(dtau)
 
 #[ Hamiltonian Monte Carlo methods ]#
 
-template finish*(self: var HisqHMC; trajectory: int; input: untyped) =
+template finish*(self: var AlphasHMC; trajectory: int; input: untyped) =
   # Smear & calculate final Hamiltonian
   self.smear()
   self.hf = self.hamiltonian()
@@ -954,10 +1016,10 @@ template finish*(self: var HisqHMC; trajectory: int; input: untyped) =
     of false: self.revert()
   input
 
-proc finish*(self: var HisqHMC): bool {.discardable.} =
+proc finish*(self: var AlphasHMC): bool {.discardable.} =
   self.finish: result = accepted
 
-template sample*(self: var HisqHMC; work: untyped) =
+template sample*(self: var AlphasHMC; work: untyped) =
   for traj in hmc.traj0..<hmc.trajs+hmc.traj0: 
     let trajectory {.inject.} = traj
     work
@@ -976,11 +1038,11 @@ proc rescale(f: auto; scale: float) =
     for mu in 0..<f.len:
       for i in f[mu]: f[mu][i] *= scale
 
-proc forceFermion(self: var HisqHMC; dtau: float): auto =
+proc forceFermion(self: var AlphasHMC; dtau: float): auto =
   self.fermionForce(dtau)
   return self.f
 
-proc forceGauge(self: var HisqHMC; dtau: float): auto =
+proc forceGauge(self: var AlphasHMC; dtau: float): auto =
   self.gaugeForce()
   rescale(self.f, dtau)
   return self.f
@@ -993,7 +1055,7 @@ proc contract[T](p,f: T): float =
     threadMaster: dS = dSt
   result = dS
 
-proc forceCheck*(self: var HisqHMC; dtau: float) =
+proc forceCheck*(self: var AlphasHMC; dtau: float) =
   var si, sf: float
   var ds1, ds2: float
   var f = self.f.newOneOf()
@@ -1054,7 +1116,7 @@ if isMainModule:
     echo "MEASploop spatial: ",pls.re," ",pls.im," temporal: ",plt.re," ",plt.im
 
   # Construct HMC object
-  var hmc = newHisqHMC:
+  var hmc = newAlphasHMC:
     # Gauge link update
     proc mdt(dtau: float) = hisq.updateGauge(dtau)
 
