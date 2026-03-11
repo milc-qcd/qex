@@ -138,6 +138,13 @@ let
       "chiral-condensate": { # tells program to estimate chiral condensate
         "sources": 10 # number of random sources to use to estiamte chiral condensate
       }
+    },
+    "flows": { # optional flow test
+      "wilson": {
+        "step-sizes": [0.02, 0.1],
+        "step-size-transition-flow-times": [1.0, 2.0],
+        "measurements": ["plaquette", "rectangle", "clover", "topology", "polyakov"]
+      }
     }
   }
 

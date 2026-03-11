@@ -1,0 +1,155 @@
+import std/[sequtils, parseutils, strutils]
+import std/[parseopt, json]
+
+import qex
+
+import ../../alphas
+import ../../alphasflow
+
+qexInit()
+
+printGitHubInformation()
+printAlphasInformationBanner()
+printParallelInformation()
+
+let
+  prompt = readCMD()
+  baseFilename = case prompt.hasKey("ensemble"):
+    of true: prompt["ensemble"].getStr()
+    of false: "test"
+
+# Proc for calculating plaquette
+proc plaquette[T](u: T) =
+  let
+    pl = u.plaq
+    nl = pl.len div 2
+    ps = pl[0..<nl].sum * 2.0
+    pt = pl[nl..^1].sum * 2.0
+    ptot = 0.5*(ps+pt)
+  echo "MEASplaq ss: ",ps,"  st: ",pt,"  tot: ",ptot
+  
+# Proc for calculating Polyakov loop
+proc polyakov[T](u: T) =
+  let pg = u[0].l.physGeom
+  var pl = newseq[typeof(u.wline @[1])](pg.len)
+  for i in 0..<pg.len: pl[i] = u.wline repeat(i+1, pg[i])
+  let
+    pls = pl[0..^2].sum / float(pl.len-1)
+    plt = pl[^1]
+  echo "MEASploop spatial: ",pls.re," ",pls.im," temporal: ",plt.re," ",plt.im
+  
+# Proc for measuring chiral condensate
+proc condensate(hmc: auto) =
+  var
+    pbpsp: SolverParams
+    tmpa = hmc.stag.g[0].l.ColorVector()
+    tmpb = hmc.stag.g[0].l.ColorVector()
+  let 
+    mass = hmc.mass
+    vol = hmc.stag.g[0].l.physVol.float
+    nsources = hmc.jsonInfo["measurements"]["chiral-condensate"]["sources"].getInt()
+  pbpsp.r2req = ActionCGTol
+  pbpsp.maxits = ActionMaxCGIter
+  for source in 0..<nsources:
+    threads: tmpa.agaussian(hmc.prng.milc)
+    hmc.stag.solve(tmpb,tmpa,mass,pbpsp)
+    threads:
+      let 
+        pbpe = 0.5*mass*tmpb.even.norm2/vol
+        pbpo = 0.5*mass*tmpb.odd.norm2/vol
+      threadBarrier()
+      threadMaster: echo "MEASpbp (",source,") mass: ",mass," pbpe: ",pbpe," pbpo: ",pbpo
+
+proc getMeasurements(self: JsonNode): seq[MeasurementKind] =
+  result = newSeq[MeasurementKind]()
+  if self.hasKey("measurements"):
+    for m in self["measurements"].items: 
+      result.add m.getStr().strToMeasurementKind()
+  else: qexError "no measurements specified for flow"
+
+# Construct HMC object
+var hmc = newAlphasHMC:
+  # Gauge link update
+  proc mdt(dtau: float) = hisq.updateGauge(dtau)
+
+  # Momentum update
+  proc mdvAll(dtau: openarray[float]) =
+    let (dtauG,dtauF) = (dtau[0],dtau[1])
+    if (dtauG != 0.0): hisq.updateMomentumGauge(dtauG)
+    if (dtauF != 0.0): hisq.updateMomentumFermion(dtauF)
+
+  # Construct nested integrator
+  let 
+    (V,T) = newIntegratorPair(mdvAll,mdt)
+    VG = gaugeIntegrator(steps = gaugeSteps, V = V[0], T = T)
+    VF = V[1]
+  integrator = fermionIntegrator(steps = fermionSteps, V = VF, T = VG)
+
+  # Read information from disk
+  if start == "read":
+    let fn = baseFilename & "_" & $(hisq.traj0)
+    hisq.readGauge(fn & ".lat")
+    if hisq.traj0 > 0:
+      hisq.readSerialRNG(fn & ".serialRNG")
+      hisq.readParallelRNG(fn & ".parallelRNG")
+    u.plaquette
+    u.polyakov
+    u.reunit
+
+# Do HMC
+echo $(hmc)
+hmc.sample:
+  hmc.prepare()
+  echo ""
+  hmc.evolve()
+  echo ""
+  hmc.finish(trajectory):
+    let output = $(info.dH) & " exp(dH): " & $(info.expdH) & " rand: " & $(info.rnd)
+    case accepted:
+      of true: echo "ACC: ", output
+      of false: echo "REJ: ", output
+    if hmc.jsonInfo.hasKey("measurements"):
+      echo ""
+      if hmc.jsonInfo["measurements"].hasKey("plaquette"): u.plaquette
+      if hmc.jsonInfo["measurements"].hasKey("polyakov"): u.polyakov
+      if hmc.jsonInfo["measurements"].hasKey("chiral-condensate"): hmc.condensate
+      echo ""
+    if hmc.jsonInfo.hasKey("checkpoint"):
+      let saveFreq = hmc.jsonInfo["checkpoint"]["frequency"].getInt()
+      if (saveFreq > 0) and (((trajectory + 1) mod saveFreq) == 0):
+        let fn = baseFilename & "_" & $(trajectory + 1)
+        hmc.writeGauge(fn & ".lat")
+        hmc.writeSerialRNG(fn & ".serialRNG")
+        hmc.writeParallelRNG(fn & ".parallelRNG")
+    if hmc.jsonInfo.hasKey("flows"):
+      for flow in hmc.jsonInfo["flows"].pairs:
+        var flowFreq: int
+
+        if hmc.jsonInfo["flows"].hasKey("frequency"): 
+            flowFreq = hmc.jsonInfo["flows"]["frequency"].getInt()
+        else: flowFreq = 1
+        
+        if (flowFreq > 0) and (((trajectory + 1) mod flowFreq) == 0):
+          let 
+            flowKind = flow.key.strToGradientFlowKind()
+            measKinds = flow.val.getMeasurements()
+            stepSizes = flow.val["step-sizes"].getFloatSeq()
+            maxFlowTimes = flow.val["step-size-transition-flow-times"].getFloatSeq()
+            transitions = maxFlowTimes.len
+          var flowObject = u.newGradientFlow(flowKind, meas = measKinds, log = false)
+
+          # run flow for specified step sizes
+          if stepSizes.len != transitions:
+            qexError "number of step sizes must match number of transition flow times"
+          threads:
+            for mu in 0..<u.len: flowObject.u[mu] := hmc.u[mu]
+          flowObject.measurements(hmc.u) # t/a^2 = 0.0 measurement
+          for transition in 0..<transitions:
+            let 
+              eps = stepSizes[transition]
+              steps = round((maxFlowTimes[transition] - flowObject.flowTime)/eps)
+            flowObject.gradientFlow(steps.int, eps)
+      
+
+qexFinalize()
+
