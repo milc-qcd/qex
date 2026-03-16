@@ -41,7 +41,7 @@ MASS_CONVERT = {
     '00025': '0.0025',
     '0001' : '0.001'
 }
-#DATA = {'20.20.20.40': {'700': ['0001']}}
+#DATA = {'48.48.48.96': {'850': ['000']}} #{'20.20.20.40': {'700': ['0001']}}
 DATA = {
     '20.20.20.40': {
         '200': ['000'],
@@ -265,6 +265,8 @@ def catalogue(volume: str, coupling: str, mass: str) -> None:
         HCGKEY:                       [],
         'acceptance':                 [],
         'cut':                        [],
+        'per-file-cut':               [],
+        'trajectories':               [],
         'hosts':                      [],
         'nodes':                      [],
         'tasks-per-node':             [],
@@ -276,18 +278,34 @@ def catalogue(volume: str, coupling: str, mass: str) -> None:
     if not os.path.isdir(path): return
     (cut, logs) = files(path)
     for log in logs:
+        snapshot = data.copy()
         try:
+            # first check for null bytes: this seems to be a problem w/ JLab
+            with open(path + log, 'rb') as in_file:
+                contents = in_file.read()
+                if b'\x00' in contents: raise ValueError("found null bytes")
+ 
+            # if no null bytes, continue
             with open(path + log, 'r') as in_file:
                 lines = in_file.readlines()
                 if not finished(lines): continue
                 for line in lines:
                     spln = line.split()
+
+                    # HMC information
                     simple = simple_measurements(data, spln)
                     if not simple: complicated_measurements(data, spln)
                     if 'kinetic:' in line:
                         if not START_NEW_TRAJECTORY:
                             data['cut'].append(0 if configuration(log) > cut else 1)
                         START_NEW_TRAJECTORY = not START_NEW_TRAJECTORY
+
+                    # generic logging information
+                    if 'starting configuration: ' in line:
+                        starting_config = int(spln[-1])
+                        data['per-file-cut'].append(0 if starting_config > cut else 1)
+                    if 'number of trajectories: ' in line:
+                        data['trajectories'].append(int(spln[-1]))
                     if 'host: ' in line: data['hosts'].append(spln[-1])
                     if 'nodes: ' in line:
                         try: data['nodes'].append(int(spln[-1]))
@@ -312,6 +330,9 @@ def catalogue(volume: str, coupling: str, mass: str) -> None:
             START_NEW_TRAJECTORY = True
             MEASPLAQ = False
             MEASPLAQ = False
+
+            # restore from snapshot
+            data = snapshot.copy()
 
             # move onto next file
             continue
