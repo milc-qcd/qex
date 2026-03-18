@@ -108,12 +108,16 @@ hmc.sample:
     case accepted:
       of true: echo "ACC: ", output
       of false: echo "REJ: ", output
+    
+    # standard measurements
     if hmc.jsonInfo.hasKey("measurements"):
       echo ""
       if hmc.jsonInfo["measurements"].hasKey("plaquette"): u.plaquette
       if hmc.jsonInfo["measurements"].hasKey("polyakov"): u.polyakov
       if hmc.jsonInfo["measurements"].hasKey("chiral-condensate"): hmc.condensate
       echo ""
+    
+    # checkpointing
     if hmc.jsonInfo.hasKey("checkpoint"):
       let saveFreq = hmc.jsonInfo["checkpoint"]["frequency"].getInt()
       if (saveFreq > 0) and (((trajectory + 1) mod saveFreq) == 0):
@@ -121,6 +125,8 @@ hmc.sample:
         hmc.writeGauge(fn & ".lat")
         hmc.writeSerialRNG(fn & ".serialRNG")
         hmc.writeParallelRNG(fn & ".parallelRNG")
+
+    # flow measurements
     if hmc.jsonInfo.hasKey("flows"):
       for flow in hmc.jsonInfo["flows"].pairs:
         var flowFreq: int
