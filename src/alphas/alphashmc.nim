@@ -88,6 +88,8 @@ var hmc = newAlphasHMC:
 
 # Do HMC
 echo $(hmc)
+when defined(AlphasHYP): echo "smearing: nHYP\n"
+else: echo "smearing: HISQ\n"
 hmc.sample:
   hmc.prepare()
   echo ""
