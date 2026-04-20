@@ -62,7 +62,7 @@ proc formatMeasurements*(
         result = concatenation.join(" ")
     else: discard
 
-proc flowMeasurements(u: auto; loop: int; tau: float): JsonNode =
+proc flowMeasurements*(u: auto; loop: int; tau: float): JsonNode =
   var
     pls, plt: ComplexProxy[ComplexObj[float64, float64]]
     poly: seq[ComplexProxy[ComplexObj[float64, float64]]]
@@ -165,30 +165,28 @@ template staggeredFlow(
     tic("flowProc")
     const nc = g[0][0].nrows.float
     const nci = g[0][0].nrows
-    const ncorners = phi0[0].len
-    const nmasses = phi0[0][0].len
+    const nsrcTime = phi0[0].len
+    const ncorners = phi0[0][0].len
+    const nmasses = phi0[0][0][0].len
     let lo = g[0].l
     var
       p = g[0].l.newGauge # mom
       f = g[0].l.newGauge # force
       n = 1
     var
-      d0p0, d1p1, phi1: array[nci, array[ncorners, array[nmasses, typeof(
-          lo.ColorVector)]]] #array[5,typeof()] is a type
+      d0p0, d1p1, phi1: array[nci, array[nsrcTime, array[ncorners, array[
+          nmasses, typeof(lo.ColorVector)]]]] #array[5,typeof()] is a type
     echo "Initializing arrays"
     # threads:
       # Initialize the arrays with the same structure as phi0
     for color in 0..<nci:
-      for corner in 0..<ncorners:
-        for mass in 0..<nmasses:
-          d0p0[color][corner][mass] = lo.ColorVector()
-          d1p1[color][corner][mass] = lo.ColorVector()
-          phi1[color][corner][mass] = lo.ColorVector()
+      for srct in 0..<nsrcTime:
+        for corner in 0..<ncorners:
+          for mass in 0..<nmasses:
+            d0p0[color][srct][corner][mass] = lo.ColorVector()
+            d1p1[color][srct][corner][mass] = lo.ColorVector()
+            phi1[color][srct][corner][mass] = lo.ColorVector()
     while true:
-      #***************************************************
-      # echo "\n\n"
-      # echo "phi0 color 0", " site 0 ", phi0[0][0][0][0], "\n"
-      #***************************************************
       let stag = newStag(g) # use hisqStag(g) for hisq
       echo "first step"
       g.echoPlaq
@@ -196,17 +194,15 @@ template staggeredFlow(
       let epsnc = eps * nc # compensate force normalization
       gc.gaugeForce(g, f)
       for color in 0..<nci:
-        for corner in 0..<ncorners:
-          for mass in 0..<nmasses:
-            d0p0[color][corner][mass] := eps*stagLap4D(g, stag, phi0[color][
-                corner][mass], M[mass]) #Delta0
-            threads:
-              phi1[color][corner][mass] := phi0[color][corner][mass] +
-                  0.25*d0p0[color][corner][mass]
-      #***************************************************
-      # echo "\n\n"
-      # echo "phi1 color 0 ", " site 0 ", phi1[0][0][0][0], "\n"
-      #***************************************************
+        for srct in 0..<nsrcTime:
+          for corner in 0..<ncorners:
+            for mass in 0..<nmasses:
+              d0p0[color][srct][corner][mass] := eps*stagLap4D(g, stag, phi0[
+                  color][srct][corner][mass], M[mass]) #Delta0
+              threads:
+                phi1[color][srct][corner][mass] := phi0[color][srct][corner][
+                    mass] +
+                  0.25*d0p0[color][srct][corner][mass]
       threads:
         for mu in 0..<f.len:
           for e in g[mu]:
@@ -215,15 +211,13 @@ template staggeredFlow(
             let t = exp(v)*g[mu][e] # exp(1/4 Z0) w0
             p[mu][e] := v # 1/4 Z0
             g[mu][e] := t # W1
-      #fermion flow
-      # let stag1 = newStag(g)
+      #fermion flow step 1: d1p1 = eps*laplace4D[g,phi1] #Delta1
       for color in 0..<nci:
-        for corner in 0..<ncorners:
-          for mass in 0..<nmasses:
-            d1p1[color][corner][mass] := eps*stagLap4D(g, stag, phi1[color][
-                corner][mass], M[mass]) #Delta1
-      # #phi2 = phi0 + 8.0/9.0*d1p1 - 2.0/9.0*d0p0
-      echo "second step"
+        for srct in 0..<nsrcTime:
+          for corner in 0..<ncorners:
+            for mass in 0..<nmasses:
+              d1p1[color][srct][corner][mass] := eps*stagLap4D(g, stag, phi1[
+                  color][srct][corner][mass], M[mass]) #Delta1
       gc.gaugeForce(g, f) # f is now -dS/dU at U = W1
       threads:
         for mu in 0..<f.len:
@@ -233,25 +227,17 @@ template staggeredFlow(
             let t = exp(v)*g[mu][e] # exp(8/9 Z1 - 17/36 Z0) W1
             p[mu][e] := v # 8/9 Z1 - 17/36 Z0
             g[mu][e] := t # W2
-      # # d2p2 = epsnc*laplace4D[g,phi2] #Delta2
-      # # threads:
-      # let stag2 = newStag(g)
+      #fermion flow step 2&3: d2p2 = epsnc*laplace4D[g,phi2] #Delta2
       for color in 0..<nci:
-        for corner in 0..<ncorners:
-          for mass in 0..<nmasses:
-            # if color == 0:
-            #   echo "phi0 color " , color, " site 0 ", phi0[0][0][0][0]
-            var phi2 = newOneOf(phi0[color][corner][mass])
-            phi2 := phi0[color][corner][mass] + 8.0/9.0*d1p1[color][corner][
-                mass] - 2.0/9.0*d0p0[color][corner][mass]
-            phi0[color][corner][mass] := phi1[color][corner][mass] + 3.0/4.0 *
-                eps*stagLap4D(g, stag, phi2, M[mass]) #3.0/4.0 * d2p2
-            # if color == 0:
-              # echo "\n"
-              # echo "phi2 color " , color, " site 0 ", phi2[0]
-              # echo "after the update in the flow:"
-              # echo "phi0 color " , color, " site 0 ", phi0[0][0][0][0]
-      echo "third step"
+        for srct in 0..<nsrcTime:
+          for corner in 0..<ncorners:
+            for mass in 0..<nmasses:
+              var phi2 = newOneOf(phi0[color][srct][corner][mass])
+              phi2 := phi0[color][srct][corner][mass] + 8.0/9.0*d1p1[color][
+                  srct][corner][mass] - 2.0/9.0*d0p0[color][srct][corner][mass]
+              phi0[color][srct][corner][mass] := phi1[color][srct][corner][
+                  mass] +
+                3.0/4.0 * eps*stagLap4D(g, stag, phi2, M[mass]) #3.0/4.0 * d2p2
       gc.gaugeForce(g, f) # f is now -dS/dU at U = W2
       threads:
         for mu in 0..<f.len:
@@ -269,8 +255,8 @@ template staggeredFlow(
 
 template staggeredFlow(
     gc: GaugeActionCoeffs;
-    g: auto; #array|seq;
-    phi: auto; #array|seq;
+    g: auto; 
+    phi: auto;
     eps: float;
     M: seq[float];
     measure: untyped
@@ -300,13 +286,11 @@ template staggeredFlow*(u: auto; phi: auto; M: seq[float]; info: JsonNode;
       gc = case info[flow]["action"].getStr()
         of "Rectangle": gaugeActRect(beta, cr)
         else: GaugeActionCoeffs(plaq: beta)
-      fn = info[flow]["path"].getStr() & info[flow]["filename"].getStr()
-      dts = info[flow].get("time-increments") #info[flow]["time-increments"].to(seq[float])
-      maxFlts = info[flow].get("maximum-flow-times") #info[flow]["maximum-flow-times"].to(seq[float])
+      dts = info[flow].get("time-increments")
+      maxFlts = info[flow].get("maximum-flow-times")
     var lastMaxFlt = 0.0
     threads: v := u
     v.reunit
-    f = fn.open(fmWrite)
     for flowTimeInfo in zip(dts, maxFlts):
       let (dtau, tmax) = flowTimeInfo
       gc.staggeredFlow(v, phi, dtau, M):
@@ -315,4 +299,3 @@ template staggeredFlow*(u: auto; phi: auto; M: seq[float]; info: JsonNode;
         body
         if tau >= tmax: break
       lastMaxFlt = tmax
-    f.close()
