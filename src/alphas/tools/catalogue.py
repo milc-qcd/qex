@@ -12,7 +12,7 @@ import statistics
 
 LOCATION = 'JLab'
 FLAVOR = 'f4'
-SMEAR_BC = 'HISQ_pppa'
+SMEAR_BCS = ['HISQ_pppa', 'HYP_pppa']
 CPATH = os.getcwd()
 
 READCG = False
@@ -43,6 +43,12 @@ MASS_CONVERT = {
 }
 #DATA = {'48.48.48.96': {'850': ['000']}} #{'20.20.20.40': {'700': ['0001']}}
 DATA = {
+    '16.16.16.32': {
+        '200': ['000'],
+        '160': ['000'],
+        '120': ['000'],
+        '800': ['000']
+    },
     '20.20.20.40': {
         '200': ['000'],
         '180': ['000'],
@@ -77,7 +83,9 @@ DATA = {
 	'160': ['000'],
 	'140': ['000'],
 	'120': ['000'],
+        '110': ['000'],
 	'100': ['000'],
+        '950': ['000'],
 	'900': ['000'],
 	'850': ['000'],
 	'800': ['000'],
@@ -92,7 +100,9 @@ DATA = {
 	'160': ['000'],
 	'140': ['000'],
 	'120': ['000'],
+        '110': ['000'],
 	'100': ['000'],
+        '950': ['000'],
 	'900': ['000'],
 	'850': ['000'],
 	'800': ['000'],
@@ -106,13 +116,18 @@ DATA = {
 	'160': ['000'],
 	'140': ['000'],
 	'120': ['000'],
+        '110': ['000'],
 	'100': ['000'],
+        '950': ['000'],
 	'900': ['000'],
 	'850': ['000'],
 	'800': ['000'],
 	'750': ['0005', '00025', '0001'],
         '725': ['0005', '00025', '0001'],
         '700': ['0005', '00025', '0001']
+    },
+    '64.64.64.128': {
+        '160': ['000']
     }
 }
 
@@ -235,11 +250,11 @@ def complicated_measurements(data: dict[str, any], line: list[str]) -> None:
         case 'MEASpbp': pass
     
 
-def catalogue(volume: str, coupling: str, mass: str) -> None:
+def catalogue(volume: str, coupling: str, mass: str, smear_bc: str) -> None:
     global MEASPLAQ, START_NEW_TRAJECTORY
     
     # path information
-    ensemble = ''.join([FLAVOR, vol(volume), 'b', coupling, 'm', mass, '_', SMEAR_BC])
+    ensemble = ''.join([FLAVOR, vol(volume), 'b', coupling, 'm', mass, '_', smear_bc])
     path = '/'.join([CPATH, volume, ensemble, ''])
 
     # data to be collected
@@ -374,4 +389,5 @@ def catalogue(volume: str, coupling: str, mass: str) -> None:
 if __name__ == '__main__':
     for volume, vDATA in DATA.items():
         for coupling, cvDATA in vDATA.items():
-            [*map(lambda mass: catalogue(volume, coupling, mass), cvDATA)]
+            for smear_bc in SMEAR_BCS:
+                [*map(lambda mass: catalogue(volume, coupling, mass, smear_bc), cvDATA)]
