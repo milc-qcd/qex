@@ -48,15 +48,17 @@ DATASETS = {
     },
     '32': {
         '200': ['000'],
-	    '180': ['000'],
-	    '160': ['000'],
-	    '140': ['000'],
-	    '120': ['000'],
-	    '100': ['000'],
-	    '900': ['000'],
-	    '850': ['000'],
-	    '800': ['000'],
-	    '750': ['0005', '00025', '0001'],
+	'180': ['000'],
+	'160': ['000'],
+	'140': ['000'],
+	'120': ['000'],
+        '110': ['000'],
+	'100': ['000'],
+        '950': ['000'],
+        '900': ['000'],
+	'850': ['000'],
+	'800': ['000'],
+	'750': ['0005', '00025', '0001'],
         '725': ['0005',	'00025', '0001'],
         '700': ['0005', '00025', '0001']
     },
@@ -66,7 +68,9 @@ DATASETS = {
         '160': ['000'],
         '140': ['000'],
         '120': ['000'],
+        '110': ['000'],
         '100': ['000'],
+        '950': ['000'],
         '900': ['000'],
         '850': ['000'],
         '800': ['000'],
@@ -80,13 +84,18 @@ DATASETS = {
         '160': ['000'],
         '140': ['000'],
         '120': ['000'],
+        '110': ['000'],
         '100': ['000'],
+        '950': ['000'],
         '900': ['000'],
         '850': ['000'],
         '800': ['000'],
         '750': ['0005', '00025', '0001'],
         '725': ['0005', '00025', '0001'],
         '700': ['0005', '00025', '0001']
+    },
+    '64': {
+        '160': ['000']
     }
 }
 
@@ -97,6 +106,7 @@ VOLUMES = {
     "32": r"$32^3 \times 64$",
     "40": r"$40^3 \times 80$",
     "48": r"$48^3 \times 96$",
+    "64": r"$64^3 \times 128$",
     "all": r"all"
 }
 BETAS = {
@@ -106,7 +116,9 @@ BETAS = {
     "800": "8.00",
     "850": "8.50",
     "900": "9.00",
+    "950": "9.50",
     "100": "10.0",
+    "110": "11.0",
     "120": "12.0",
     "140": "14.0",
     "160": "16.0",
@@ -125,7 +137,8 @@ ENSVOL = {
     "24": "l24t48",
     "32": "l32t64",
     "40": "l40t80",
-    "48": "l48t96"
+    "48": "l48t96",
+    "64": "l64t128"
 }
 
 ### helper procedures ###
@@ -214,9 +227,17 @@ if volume != "all":
         format_func = lambda m: MASSES[m]
     )
 
+    # action type toggle
+    action_type = st.sidebar.radio(
+        "Action type",
+        ["HISQ", "HYP"],
+        horizontal = True,
+        key = f"action_{volume}_{coupling}_{mass}"
+    )
+
     ### display ensemble information ###
 
-    ensemble = ''.join(['f4', ENSVOL[volume], 'b', coupling, 'm', mass, '_HISQ_pppa'])
+    ensemble = ''.join(['f4', ENSVOL[volume], 'b', coupling, 'm', mass, f'_{action_type}_pppa'])
     fn = ensemble + '-info.json'
 
 if os.path.exists('../data/' + fn) and volume != 'all':
@@ -734,6 +755,20 @@ elif volume == 'all':
         format_func = lambda beta: BETAS[beta]
     )
 
+    # action type toggles per (volume, mass) combination
+    st.sidebar.markdown("### Action types")
+    action_types = {}
+    for _vol in [*VOLUMES][:-1:]:
+        if coupling in DATASETS[_vol]:
+            for _m in DATASETS[_vol][coupling]:
+                _lbl = f"{ENSVOL[_vol]} / {MASSES[_m]}"
+                action_types[(_vol, _m)] = st.sidebar.radio(
+                    _lbl,
+                    ["HISQ", "HYP"],
+                    horizontal = True,
+                    key = f"action_{_vol}_{coupling}_{_m}"
+                )
+
     edata = {
         'plaquette': {},
         'dH': {},
@@ -753,7 +788,8 @@ elif volume == 'all':
         edata['acc-rate'][volume] = {}
         idxs.append(idx)
         for mass in DATASETS[volume][coupling]:
-            ensemble = ''.join(['f4', ENSVOL[volume], 'b', coupling, 'm', mass, '_HISQ_pppa'])
+            _act = action_types.get((volume, mass), 'HISQ')
+            ensemble = ''.join(['f4', ENSVOL[volume], 'b', coupling, 'm', mass, f'_{_act}_pppa'])
             fn = ensemble + '-info.json'
             if os.path.exists('../data/' + fn) and volume != 'all':
                 with open('../data/' + fn, 'r') as in_file: data = json.load(in_file)
