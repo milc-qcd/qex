@@ -14755,8 +14755,7 @@
         "parallel-rng": "milc",
         "serial-seed": " 076587790",
         "parallel-seed": 384948396,
-        "gauge-start": "read",
-        "metropolis": false
+        "gauge-start": "read"
     },
     "action": {
         "beta": 7.25,
@@ -14764,7 +14763,10 @@
         "hasenbusch-mass": 0.4,
         "lepage": 0.0,
         "naik": 1.0,
-        "boundary-conditions": "pppa"
+        "boundary-conditions": "pppa",
+        "unitary-projection": {
+            "delta": 0.0005
+        }
     },
     "gauge": {
         "integrator": "2MN",

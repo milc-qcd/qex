@@ -15,6 +15,8 @@ import matplotlib.pyplot as plt
 
 import plot
 
+DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'data') + os.sep
+
 ### information ###
 
 DATASETS = {
@@ -28,7 +30,7 @@ DATASETS = {
         '900': ['000'],
         '850': ['000'],
         '800': ['000'],
-        '750': ['0005', '00025', '0001'],
+        '750': ['000', '0005', '00025', '0001'],
         '725': ['0005', '00025', '0001'],
         '700': ['0005', '00025', '0001']
     },
@@ -42,7 +44,7 @@ DATASETS = {
         '900': ['000'],
         '850': ['000'],
         '800': ['000'],
-        '750': ['0005', '00025', '0001'],
+        '750': ['000', '0005', '00025', '0001'],
         '725': ['0005', '00025', '0001'],
         '700': ['0005', '00025', '0001']
     },
@@ -58,7 +60,7 @@ DATASETS = {
         '900': ['000'],
 	'850': ['000'],
 	'800': ['000'],
-	'750': ['0005', '00025', '0001'],
+	'750': ['000', '0005', '00025', '0001'],
         '725': ['0005',	'00025', '0001'],
         '700': ['0005', '00025', '0001']
     },
@@ -74,7 +76,7 @@ DATASETS = {
         '900': ['000'],
         '850': ['000'],
         '800': ['000'],
-        '750': ['0005', '00025', '0001'],
+	'750': ['000', '0005', '00025', '0001'],
         '725': ['0005',	'00025', '0001'],
         '700': ['0005', '00025', '0001']
     },
@@ -90,7 +92,7 @@ DATASETS = {
         '900': ['000'],
         '850': ['000'],
         '800': ['000'],
-        '750': ['0005', '00025', '0001'],
+        '750': ['000', '0005', '00025', '0001'],
         '725': ['0005', '00025', '0001'],
         '700': ['0005', '00025', '0001']
     },
@@ -240,15 +242,15 @@ if volume != "all":
     ensemble = ''.join(['f4', ENSVOL[volume], 'b', coupling, 'm', mass, f'_{action_type}_pppa'])
     fn = ensemble + '-info.json'
 
-if os.path.exists('../data/' + fn) and volume != 'all':
+if os.path.exists(DATA_DIR + fn) and volume != 'all':
     ### side bar display ###
-    with open('../data/' + fn, 'r') as in_file: data = json.load(in_file)
+    with open(DATA_DIR + fn, 'r') as in_file: data = json.load(in_file)
     st.sidebar.markdown(
     f"""
     ## Summary \n
     - configurations: {len(data['dH']) - sum(data['cut'])}
     - running: {data['running']}
-    - last update: {datetime.datetime.fromtimestamp(os.path.getctime('../data/' + fn))}
+    - last update: {datetime.datetime.fromtimestamp(os.path.getctime(DATA_DIR + fn))}
     
     ## Molecular Dynamics
     - trajectory length: {data['hmc']['trajectory-length']}
@@ -791,8 +793,8 @@ elif volume == 'all':
             _act = action_types.get((volume, mass), 'HISQ')
             ensemble = ''.join(['f4', ENSVOL[volume], 'b', coupling, 'm', mass, f'_{_act}_pppa'])
             fn = ensemble + '-info.json'
-            if os.path.exists('../data/' + fn) and volume != 'all':
-                with open('../data/' + fn, 'r') as in_file: data = json.load(in_file)
+            if os.path.exists(DATA_DIR + fn) and volume != 'all':
+                with open(DATA_DIR + fn, 'r') as in_file: data = json.load(in_file)
                 cuts = data['cut']
 
                 def filter_cut(d):
