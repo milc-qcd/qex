@@ -4,6 +4,7 @@ import field
 import gauge
 import gauge/[fat7l, fat7lderiv]
 import alphaslinks, alphasproject
+import strformat
 
 export alphaslinks
 export alphasproject
