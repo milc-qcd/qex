@@ -65,7 +65,7 @@ proc toQEX(r0: seq[Field], x0: GridLatticeGaugeField) =
       of true: lo.getSubset("even")
       of false: lo.getSubset("odd")
 
-  threads:
+  block:
     {.emit: "using namespace Grid;".}
     {.emit: "Coordinate c(`nd`);".}
     {.emit: ["autoView(dst, ", x[], ", CpuRead);"].}
