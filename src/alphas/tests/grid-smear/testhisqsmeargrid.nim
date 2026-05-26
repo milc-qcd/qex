@@ -33,7 +33,7 @@ proc testSmear =
   rankSum(dsu)
   rankSum(dsul)
 
-  echo "dsu: ", dsu/3.0/lo.physVol, " dsul: ", dsul/3.0/lo.physVol
+  echo "dsu: ", dsu/3.0/lo.physVol, " dsul: ", dsul/4.0/3.0/lo.physVol
 
 when isMainModule:
   qexInit()
