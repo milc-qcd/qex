@@ -103,6 +103,7 @@ proc testAction =
   threads:
     for mu in 0..<qf.len:
       for s in qf[mu]:
+        qf[mu][s] *= -1.0
         qgf[mu][s] *= 2.0
 
   var df = 0.0
@@ -111,7 +112,7 @@ proc testAction =
     var dft = 0.0
     for mu in 0..<qf.len:
       for s in qf[mu]:
-        dft += redot(qf[mu][s] - qgf[mu][s], unit[mu][s]).simdSum()
+        dft += redot(qf[mu][s] - qgf[mu][s], qf[mu][s] - qgf[mu][s]).simdSum()
     threadBarrier()
     threadSum(dft)
     threadBarrier()
@@ -120,10 +121,7 @@ proc testAction =
 
   rankSum(df)
 
-  echo "df: ", df/4.0/3.0/lo.physVol
-
-  #echo GaugeActionCoeffs(plaq: 1.0).gaugeAction1(qf)
-  #echo GaugeActionCoeffs(plaq: 1.0).gaugeAction1(qgf)
+  echo "df: ", sqrt(df)/4.0/3.0/lo.physVol
 
 
 
