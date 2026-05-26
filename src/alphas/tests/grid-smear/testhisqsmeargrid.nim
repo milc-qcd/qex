@@ -25,10 +25,18 @@ proc testSmear =
   var (dsu, dsul) = (0.0, 0.0)
 
   threads:
+    var (dsut, dsult) = (0.0, 0.0)
     for mu in 0..<u.len:
       for s in u[mu]:
-        dsu += redot(qsu[mu][s] - gsu[mu][s], unit[mu][s]).simdSum()
-        dsul += redot(qsul[mu][s] - gsul[mu][s], unit[mu][s]).simdSum()
+        dsut += redot(qsu[mu][s] - gsu[mu][s], unit[mu][s]).simdSum()
+        dsult += redot(qsul[mu][s] - gsul[mu][s], unit[mu][s]).simdSum()
+    threadBarrier()
+    threadSum(dsut)
+    threadSum(dsult)
+    threadBarrier()
+    threadMaster:
+      dsu = dsut
+      dsul = dsult
 
   rankSum(dsu)
   rankSum(dsul)
