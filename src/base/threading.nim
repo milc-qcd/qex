@@ -67,7 +67,8 @@ template threadBarrierO* = ompBarrier
 
 macro emitStackTraceX(x: typed): untyped =
   template est(x) =
-    {.emit: "// instantiationInfo: " & x.}
+    #{.emit: "// instantiationInfo: " & x.}
+    {.emit: ["// instantiationInfo: ", $x].}
   let ii = x.repr.replace("\n","")
   result = getAst(est(ii))
 
@@ -178,6 +179,26 @@ macro tFor*(index: untyped; slice: Slice; body: untyped): untyped =
     i0 = slice[1]
     i1 = slice[2]
   result = tForX(index, i0, i1, body)
+
+iterator threadRange*(n: int): int =
+  let s = numThreads
+  let id = threadNum
+  let i0 = (n*id) div s
+  let i1 = (n*(id+1)) div s
+  for i in i0 ..< i1:
+    yield i
+
+iterator threadRangeAligned*(n: int, a: int): int =
+  let na = (n+a-1) div a
+  let s = numThreads
+  let id = threadNum
+  let i0 = a * ((na*id) div s)
+  let i1 = min(n, a * ((na*(id+1)) div s))
+  for i in i0 ..< i1:
+    yield i
+
+template threadRangeV*(n: int): int =
+  threadRangeAligned(n, VLEN)
 
 discard """
 iterator `.|`*[S, T](a: S, b: T): T {.inline.} =
