@@ -1,6 +1,52 @@
-import macros
-import base/metaUtils
+import macros, strutils
+import base/[metaUtils,profile]
 import expr
+
+{.pragma: cudah, header:"cuda_runtime.h".}
+
+# vector types
+type
+  float2* {.importc,cudah,completeStruct.} = object
+    x,y: float32
+  double2* {.importc,cudah,completeStruct.} = object
+    x,y: float64
+  float3* {.importc,cudah,completeStruct.} = object
+    x,y,z: float32
+  double3* {.importc,cudah,completeStruct.} = object
+    x,y,z: float64
+  float4* {.importc,cudah,completeStruct.} = object
+    x,y,z,w: float32
+  double4* {.importc,cudah,completeStruct.} = object
+    x,y,z,w: float64
+  CudaVecTypes* = float2 | double2 | float3 | double3 | float4 | double4
+  CudaTypes* = int32 | int64 | float32 | float64 | CudaVecTypes
+template vecType*[N:static int,T](t: typedesc[array[N,T]]): typedesc =
+  when T is float32:
+    when N == 1: float32
+    elif N == 2: float2
+    elif N == 3: float3
+    elif N == 4: float4
+    else: t
+  elif T is float64:
+    when N == 1: float64
+    elif N == 2: double2
+    elif N == 3: double3
+    elif N == 4: double4
+    else: t
+  else:
+    t
+template `+=`*(a,b: float2 | double2) =
+  a.x += b.x
+  a.y += b.y
+template `+=`*(a,b: float3 | double3) =
+  a.x += b.x
+  a.y += b.y
+  a.z += b.z
+template `+=`*(a,b: float4 | double4) =
+  a.x += b.x
+  a.y += b.y
+  a.z += b.z
+  a.w += b.w
 
 proc addChildrenFrom*(dst,src: NimNode): NimNode =
   for c in src: dst.add(c)
@@ -9,12 +55,10 @@ macro procInst*(p: typed): auto =
   #echo "begin procInst:"
   #echo p.treerepr
   result = p[0]
-macro makeCall*(p: proc, x: tuple): NimNode =
-  result = newCall(p).addChildrenFrom(x)
 
 type
   CudaDim3* {.importc:"dim3",header:"cuda_runtime.h".} = object
-    x*, y*, z*: cint
+    x*, y*, z*: cuint
   cudaError_t* {.importc,header:"cuda_runtime.h".} = object
   cudaMemcpyKind* {.importc,header:"cuda_runtime.h".} = object
 var
@@ -33,21 +77,33 @@ template toPointer*(x: typed): pointer =
   elif x is ptr: x
   elif x is seq: toPointer(x[0])
   else: pointer(unsafeAddr(x))
+#template dataAddr*(x: typed): pointer =
+#  #dumpType: x
+#  when x is seq: dataAddr(x[0])
+#  elif x is array: dataAddr(x[0])
+#  #elif x is ptr: x
+#  else: pointer(unsafeAddr(x))
+#  #else: x
 template dataAddr*(x: typed): pointer =
-  #dumpType: x
-  when x is seq: dataAddr(x[0])
-  elif x is array: dataAddr(x[0])
-  #elif x is ptr: x
-  else: pointer(unsafeAddr(x))
-  #else: x
+  when x is seq:
+    var a = addr x[0]
+    #dataAddr(a)
+    a
+  elif x is array:
+    vara a = addr x[0]
+    #dataAddr(a)
+    a
+  else: pointer(addr x)
 
+proc cudaSetDevice*(device: cint): cudaError_t
+  {.importC,header:"cuda_runtime.h".}
 proc cudaGetLastError*(): cudaError_t
   {.importC,header:"cuda_runtime.h".}
 proc cudaGetErrorStringX*(error: cudaError_t): ptr char
   {.importC:"cudaGetErrorString",header:"cuda_runtime.h".}
 proc cudaGetErrorString*(error: cudaError_t): cstring =
   var s {.codegendecl:"const $# $#".} = cudaGetErrorStringX(error)
-  result = s
+  result = cast[cstring](s)
 proc `$`*(error: cudaError_t): string =
   let s = cudaGetErrorString(error)
   result = $s
@@ -57,11 +113,17 @@ converter toBool*(e: cudaError_t): bool =
 proc cudaMalloc*(p:ptr pointer, size: csize_t): cudaError_t
   {.importC,header:"cuda_runtime.h".}
 template cudaMalloc*(p:pointer, size: csize_t): cudaError_t =
-  cudaMalloc((ptr pointer)(p.addr), size)
+  cudaMalloc(p.addr, size)
 proc cudaFree*(p: pointer): cudaError_t
   {.importC,header:"cuda_runtime.h".}
 proc cudaMallocManaged*(p: ptr pointer, size: csize_t): cudaError_t
   {.importC,header:"cuda_runtime.h".}
+proc cudaMallocHost*(p: ptr pointer, size: csize_t): cudaError_t
+  {.importC,header:"cuda_runtime.h".}
+
+proc cudaMemset*(devPtr: pointer, value: cint, count: csize_t):
+  cudaError_t {.importC:"cudaMemset",header:"cuda_runtime.h".}
+#template cudaMemsetX*(devPtr: pointer, value: SomeInteger, count: SomeInteger)
 
 proc cudaMemcpyX*(dst,src: pointer, count: csize_t, kind: cudaMemcpyKind):
   cudaError_t {.importC:"cudaMemcpy",header:"cuda_runtime.h".}
@@ -71,66 +133,49 @@ template cudaMemcpy*(dst,src: typed, count: csize_t,
   let psrc = toPointer(src)
   cudaMemcpyX(pdst, psrc, count, kind)
 
-template gpuMalloc*(size: csize_t):pointer =
-  var p:pointer
-  let err = cudaMalloc(p, size)
-  if err:
-    echo err
-    p = cast[pointer](0)
-  p
-template gpuFree*(p:pointer) =
-  let err = cudaFree(p)
-  if err:
-    echo err
-    quit cast[cint](err)
-template gpuMemCpyToGpu*(dst,src: pointer, count: csize_t):cint =
-  let err = cudaMemcpy(dst,src,count,cudaMemcpyHostToDevice)
-  if err:
-    echo err
-  cast[cint](err)
-template gpuMemCpyToCpu*(dst,src: pointer, count: csize_t):cint =
-  let err = cudaMemcpy(dst,src,count,cudaMemcpyDeviceToHost)
-  if err:
-    echo err
-  cast[cint](err)
+proc cudaGetDeviceCount*(deviceCount: ptr cint):
+  cudaError_t {.importC,header:"cuda_runtime.h".}
 
 proc cudaLaunchKernel(p:pointer, gd,bd: CudaDim3, args: ptr pointer):
   cudaError_t {.importC,header:"cuda_runtime.h".}
 
+proc syncThreads*() {.importc:"__syncthreads",header:"cuda_runtime.h".}
+proc threadFence*() {.importc:"__threadfence",header:"cuda_runtime.h".}
+proc atomicInc*(address: ptr cuint, val: cuint): cuint {.importc,header:"cuda_runtime.h".}
+template atomicInc*(address: ptr cuint, val: SomeInteger): auto =
+  atomicInc(address, cuint val)
 proc cudaDeviceReset*(): cudaError_t
   {.importC,header:"cuda_runtime.h".}
 proc cudaDeviceSynchronize*(): cudaError_t
   {.importC,header:"cuda_runtime.h".}
 
-#proc printf*(fmt:cstring):cint {.importc,varargs,header:"<stdio.h>",discardable.}
-#proc fprintf*(stream:ptr FILE,fmt:cstring):cint {.importc,varargs,header:"<stdio.h>".}
-#proc malloc*(size: csize_t):pointer {.importc,header:"<stdlib.h>".}
+var gridDim*{.importC,header:"cuda_runtime.h".}: CudaDim3
+var blockDim*{.importC,header:"cuda_runtime.h".}: CudaDim3
+var blockIdx*{.importC,header:"cuda_runtime.h".}: CudaDim3
+var threadIdx*{.importC,header:"cuda_runtime.h".}: CudaDim3
+template getGridDim*: auto = gridDim
+template getBlockIdx*: auto = blockIdx
+template getBlockDim*: auto = blockDim
+template getThreadIdx*: auto = threadIdx
 
 template cudaDefs(body: untyped): untyped {.dirty.} =
-  var gridDim{.global,importC,noDecl.}: CudaDim3
-  var blockIdx{.global,importC,noDecl.}: CudaDim3
-  var blockDim{.global,importC,noDecl.}: CudaDim3
-  var threadIdx{.global,importC,noDecl.}: CudaDim3
-  template getGridDim: untyped {.used.} = gridDim
-  template getBlockIdx: untyped {.used.} = blockIdx
-  template getBlockDim: untyped {.used.} = blockDim
-  template getThreadIdx: untyped {.used.} = threadIdx
-  template getThreadNum: untyped {.used.} = blockDim.x * blockIdx.x + threadIdx.x
-  template getNumThreads: untyped {.used.} = gridDim.x * blockDim.x
   bind inlineProcs
-  {.emit:"#define nimZeroMem(b,len) memset((b),0,(len))".}
+  {.emit:["#define nimZeroMem(b,len) memset((b),0,(len))"].}
+  {.emit:["#define nimCopyMem(a,b,len) memcpy((a),(b),(len))"].}
+  {.pragma: shared, noInit, codegendecl:"__shared__ $# $#".}
   inlineProcs:
     body
-  {.emit:"#undef nimZeroMem".}
+  {.emit:["#undef nimZeroMem"].}
+  {.emit:["#undef nimCopyMem"].}
 
-template cudaLaunch*(p: proc; blocksPerGrid,threadsPerBlock: SomeInteger;
+template cudaLaunch*(p: proc {.cdecl.}; blocksPerGrid,threadsPerBlock: SomeInteger;
                      arg: varargs[pointer,dataAddr]) =
-  var pp: proc = p
+  var pp = pointer p
   var gridDim, blockDim: CudaDim3
-  gridDim.x = blocksPerGrid
+  gridDim.x = cuint blocksPerGrid
   gridDim.y = 1
   gridDim.z = 1
-  blockDim.x = threadsPerBlock
+  blockDim.x = cuint threadsPerBlock
   blockDim.y = 1
   blockDim.z = 1
   var args: array[arg.len, pointer]
@@ -138,7 +183,7 @@ template cudaLaunch*(p: proc; blocksPerGrid,threadsPerBlock: SomeInteger;
   #echo "really launching kernel"
   let err = cudaLaunchKernel(pp, gridDim, blockDim, addr args[0])
   if err:
-    echo err
+    echo "cudaLaunch: ", err
     quit cast[cint](err)
 
 template `<<`*(p: proc, x: tuple): untyped = (p,x)
@@ -184,64 +229,61 @@ proc cudaproc(s:string, p:NimNode):NimNode =
   result.addPragma parseExpr("{.codegenDecl:\""&s&" $# $#$#\".}")[0]
   result.body = getAst(cudaDefs(result.body))
   var sl = newStmtList()
-  sl.add( quote do:
-    {.push checks: off.}
-    {.push stacktrace: off.} )
+  #sl.add( quote do:
+  #  {.push checks: off.}
+  #  {.push stacktrace: off.} )
   sl.add result
   result = sl
   #echo "end cuda:"
   #echo result.treerepr
 macro cudaGlobal*(p: untyped): untyped = cudaproc("__global__",p)
 
-template onGpu*(nn,tpb: untyped, body: untyped): untyped =
-  block:
-    var v = packVars(body, getGpuPtr)
-    type ByCopy[T] {.bycopy.} = object
-      d: T
-    proc kern(xx: ByCopy[type(v)]) {.cudaGlobal.} =
-      template deref(k: int): untyped = xx.d[k][]
-      substVars(body, deref)
-    let ni = nn.int32
-    let threadsPerBlock = tpb.int32
-    let blocksPerGrid = (ni+threadsPerBlock-1) div threadsPerBlock
-    #echo "launching kernel"
-    cudaLaunch(kern, blocksPerGrid, threadsPerBlock, v)
-    discard cudaDeviceSynchronize()
-template onGpu*(nn: untyped, body: untyped): untyped = onGpu(nn, 64, body)
-template onGpu*(body: untyped): untyped = onGpu(512*64, 64, body)
+proc genCpuPrepare(n:seq[NimNode]):NimNode =
+  result = newNimNode(nnkTupleConstr)
+  for c in n:
+    result.add newCall(ident"toGpu", c[0])
 
-template getGpuPtr*(x: SomeNumber): untyped = unsafeAddr x
+proc genCpuFinalize(n:seq[NimNode], a: NimNode):NimNode =
+  template r(a,x,i:untyped):untyped =
+    fromGpu(x,a[i])
+  result = newstmtlist()
+  for c in n:
+    result.add getast r(a,c[0],c[2])
 
 
 when isMainModule:
-  type FltArr = UncheckedArray[float32]
+  type FltArr = ptr UncheckedArray[float32]
 
-  proc vectorAdd(A: FltArr; B: FltArr; C: var FltArr; n: int32) {.cudaGlobal.} =
+  proc vectorAdd(A: FltArr; B: FltArr; C: FltArr; n: uint32) {.cdecl,cudaGlobal.} =
     var i = blockDim.x * blockIdx.x + threadIdx.x
     if i < n:
       C[i] = A[i] + B[i]
 
   proc test =
-    var n = 50000.cint
+    var n = 50000
     var
       a = newSeq[float32](n)
       b = newSeq[float32](n)
       c = newSeq[float32](n)
-    var threadsPerBlock: cint = 256
-    var blocksPerGrid: cint = (n + threadsPerBlock - 1) div threadsPerBlock
+    for i in 0..<n:
+      a[i] = 1
+      b[i] = 2
 
-    cudaLaunch(vectorAdd, blocksPerGrid, threadsPerBlock, a, b, c, n)
+    var threadsPerBlock = 256
+    var blocksPerGrid = (n + threadsPerBlock - 1) div threadsPerBlock
 
-    template getGpuPtr(x: int): untyped = x
-    template getGpuPtr[T](x: seq[T]): untyped = addr(x[0])
-    template `[]`(x: ptr SomeNumber, i: SomeInteger): untyped {.used.} =
-      cast[ptr UncheckedArray[type(x[])]](x)[][i]
-    template `[]=`(x: ptr SomeNumber, i: SomeInteger, y:untyped): untyped {.used.} =
-      cast[ptr UncheckedArray[type(x[])]](x)[][i] = y
+    let pa = addr a[0]
+    let pb = addr b[0]
+    let pc = addr c[0]
+    let un = uint32 n
+    cudaLaunch(vectorAdd, blocksPerGrid, threadsPerBlock, pa, pb, pc, un)
+    discard cudaDeviceSynchronize()
 
-    onGpu(n):
-      let i = getBlockDim().x * getBlockIdx().x + getThreadIdx().x
-      if i < n:
-        c[i] = a[i] + b[i]
+    var errcnt = 0
+    for i in 0..<n:
+      let d = a[i] + b[i]
+      if errcnt < 10 and c[i] != d:
+        echo "error: ", i, "  ", c[i], "  ", d
+        inc errcnt
 
   test()

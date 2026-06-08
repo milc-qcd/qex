@@ -12,12 +12,16 @@ type
     neighborBck*: seq[seq[int32]]  # bck neighbor for extended outer lattice
     nOut*: int  # sites in outer lattice
     nExt*: int  # sites in extended outer lattice
+    nOutPar*: array[2,int]  # sites in outer lattice by parity
+    nExtPar*: array[2,int]  # sites in extended outer lattice by parity
   Halo*[L,F,T] = ref object
     layout*: HaloLayout[L]
     field*: F
     halo*: alignedMem[T]
     nOut*: int  # sites in outer lattice
     nExt*: int  # sites in extended outer lattice
+    nOutPar*: array[2,int]  # sites in outer lattice by parity
+    nExtPar*: array[2,int]  # sites in extended outer lattice by parity
   HaloMap*[L] = ref object
     layout*: HaloLayout[L]
     offsets*: seq[seq[int32]]  # offsets of outer sites needed
@@ -67,9 +71,10 @@ proc makeHaloLayout*[L:Layout](lo: L, fwdOffset,bckOffset: openarray[SomeInteger
   let nOut = lo.nSitesOuter
   var lex = newSeq[int32](nExt)
   var index = newSeq[int32](nExt)
+  var idxp = [newSeq[int32](0), newSeq[int32](0)]  # store indices by parity
+  let paro = (lo.coordmin.sum + bckOffset.sum) mod 2  # global parity of extended origin
   let nd = lo.nDim
   var x = newSeq[int32](nd)
-  var k = int32 nOut
   for i in 0..<nExt:  # loop over lex indices
     x.lexCoord(i, outerExt)
     if x.inside(bckOffset, outerHigh):
@@ -78,6 +83,12 @@ proc makeHaloLayout*[L:Layout](lo: L, fwdOffset,bckOffset: openarray[SomeInteger
       lex[loc] = int32 i
       index[i] = int32 loc
     else:
+      let par = (paro + x.sum) mod 2
+      idxp[par].add int32 i
+      #echo par, " ", x
+  var k = int32 nOut
+  for p in 0..1:
+    for i in idxp[p]:
       lex[k] = int32 i
       index[i] = int32 k
       inc k
@@ -90,6 +101,10 @@ proc makeHaloLayout*[L:Layout](lo: L, fwdOffset,bckOffset: openarray[SomeInteger
   result.index = index
   result.nOut = nOut
   result.nExt = nExt
+  result.nOutPar[0] = lo.nEvenOuter
+  result.nOutPar[1] = lo.nOddOuter
+  result.nExtPar[0] = result.nOutPar[0] + idxp[0].len
+  result.nExtPar[1] = result.nOutPar[1] + idxp[1].len
   result.neighborFwd = newSeq[seq[int32]](nd)
   result.neighborBck = newSeq[seq[int32]](nd)
   for mu in 0..<nd:
@@ -169,11 +184,14 @@ proc makeHalo*[L,F,T](hl: HaloLayout[L], f: F, t: typedesc[T]): Halo[L,F,T] =
   result.field = f
   result.nOut = hl.nOut
   result.nExt = hl.nExt
+  result.nOutPar = hl.nOutPar
+  result.nExtPar = hl.nExtPar
   let nhalo = result.nExt - result.nOut
   result.halo.newU(nhalo)
 
 template makeHalo*[L,F](hl: HaloLayout[L], f: F): auto =
-  makeHalo(hl, f, eval(F.type[0]))
+  #makeHalo(hl, f, eval(F.type[0]))
+  makeHalo(hl, f, eval(F.type.index(int)))
 
 template copy*[F,T;Rev:static bool](gh: GatherHalo[F,T,Rev], d: pointer, s: SomeInteger) =
   type E = eval(index(type T, type asSimd(0)))
@@ -204,17 +222,30 @@ template copy*[F,T;Rev:static bool](gh: GatherHalo[F,T,Rev], d: SomeInteger, s: 
     let o = d div gh.vlen
     let i = d mod gh.vlen
     gh.dest[o][asSimd(i)] = gh.src{s}
-#[
-template copy*[F,T](gh: GatherHalo[F,T], dv: SomeInteger, di: array,
-                    s: array, n: SomeInteger) =
-  echo n, " ", dv, " ", di, " ", s
+template copy*[F,T;Rev:static bool](gh: GatherHalo[F,T,Rev], dv: SomeInteger, di: array,
+                                    s: array, n: SomeInteger) =
+  #echo n, " ", dv, " ", di, " ", s
   #for i in 0..<n:
   #  gh.dest[dv][asSimd(di[i])] = gh.src{s[i]}
-  let t = gh.dest[dv]
-  for i in 0..<n:
-    t[asSimd(di[i])] = gh.src{s[i]}
+  var t = gh.dest[dv]
+  #echo $typeof(t)
+  when typeof(t) is Color[MatrixArray]:
+  #when false:
+    #echo "true"
+    for ic in 0..<t.nrows:
+      for jc in 0..<t.ncols:
+        for i in 0..<n:
+          let sv = s[i] div gh.vlen
+          let si = s[i] mod gh.vlen
+          #static: echo $typeof(t[ic,jc]), " ", $typeof(asSimd(di[i])), " ", $typeof(gh.src[sv][ic,jc][asSimd(si)])
+          t[ic,jc][asSimd(di[i])] = gh.src[sv][ic,jc][asSimd(si)]
+  else:
+    for i in 0..<n:
+      t[asSimd(di[i])] = gh.src{s[i]}
+      #let sv = s[i] div gh.vlen
+      #let si = s[i] mod gh.vlen
+      #t[asSimd(di[i])] = gh.src[sv][asSimd(si)]
   gh.dest[dv] = t
-]#
 
 proc update*[L,F,T](h: Halo[L,F,T], hm: HaloMap[L], c: Comm) =
   tic("Halo update")
@@ -228,7 +259,7 @@ proc update*[L,F,T](h: Halo[L,F,T], hm: HaloMap[L], c: Comm) =
   toc("gather")
 
 proc updateRev*[L,F,T](h: Halo[L,F,T], hm: HaloMap[L], c: Comm) =
-  tic("Halo update")
+  tic("Halo updateRev")
   let elemSize = sizeof(T) div L.V
   var gh: GatherHalo[F,T,true]
   gh.src = h.field
