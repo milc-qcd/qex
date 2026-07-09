@@ -6,9 +6,10 @@ import qex
 import gauge, physics/qcdTypes
 import algorithms/integrator, maths/special, utils/resample
 import os, strutils, times
-import numericalnim
-from numericalnim/ode import IntegratorProc
-type IntegratorProc*[T] = ode.IntegratorProc[T]
+#import numericalnim
+#from numericalnim/ode import IntegratorProc
+#type IntegratorProc*[T] = ode.IntegratorProc[T]
+import algorithms/ode
 
 proc mean(xs: Ensemble[seq[float]]): float =
   var m = 0.0
@@ -17,7 +18,7 @@ proc mean(xs: Ensemble[seq[float]]): float =
     m += (x - m)/float(i+1)
   m
 
-proc naiveIntAutocorr(xs: Ensemble[seq[float]], maxlen: int): float =
+proc naiveIntAutocorrL(xs: Ensemble[seq[float]], maxlen: int): float =
   ## Very rough integrated autocorrelation: sum of correlation out to some cut.
   let N = xs.len
   let m = mean(xs)
@@ -40,6 +41,16 @@ proc naiveIntAutocorr(xs: Ensemble[seq[float]], maxlen: int): float =
       break
     sumRho += 2.0*rho
   sumRho
+
+proc naiveIntAutocorr(xs: Ensemble[seq[float]]): float =
+  var ac = 39.0
+  var maxlen = 0
+  while true:
+    let newmaxlen = min(xs.len, int(5*(ac+1)))
+    if newmaxlen <= maxlen: break
+    maxlen = newmaxlen
+    ac = naiveIntAutocorrL(xs, maxlen)
+  ac
 
 proc tunnelingRate(xs: Ensemble[seq[float]]): float =
   var r = 0.0
@@ -112,7 +123,7 @@ proc hamiltonian(gc:GaugeActionCoeffs, g:auto, p:auto):auto =
   toc("hamiltonian")
   (ga, t, h)
 
-type MDAlgo = enum hamilton, nosehoover, ghmc, gv, test1
+type MDAlgo = enum hamilton, nosehoover, ghmc, gv, test1, linp
 converter toMDAlgo(s:string):MDAlgo = parseEnum[MDAlgo](s)
 let gAlgs = [ghmc, gv]
 
@@ -145,13 +156,18 @@ letParam:
   mdalgo:MDAlgo = "hamilton"
   ## extra params in other mdalgo
   gamma = 1.0
+  a = 1.0
+  b = 0.0
+  eps = 1e-32
   ## 2MN,0.21 | 4MN3F1GP,0.27 | 4MN5F2GP
   gintalg:integrator.IntegratorProc = "2MN,0.21"
   omfLambda = 0.21
   gsteps = 20
   intsteps = 100
-  absTol = 1e-16
-  relTol = 0.0
+  adapt = true
+  impl = false
+  absTol = 0.0
+  relTol = 1e-16
   reduceT = true
   alwaysAccept:bool = 0
   revCheckFreq = ntraj
@@ -175,10 +191,18 @@ let
   dof = float(2*vol)
   useG = mdAlgo in gAlgs
 
+if useG and a != 1:
+  if not adapt or impl:
+    qexError "useG with a != 1 must use adapt"
+  if reduceT:
+    qexError "useG with a != 1 must not use reduceT"
+
 var
   g = lo.newGauge
-  r = lo.newRNGField(RngMilc6, seed)
-  R:RngMilc6  # global RNG
+  #r = lo.newRNGField(RngMilc6, seed)
+  #R:RngMilc6  # global RNG
+  r = lo.newRNGField(MRG32K3A, seed)
+  R:MRG32K3A  # global RNG
 R.seed(seed, 987654321)
 
 case infn
@@ -202,12 +226,18 @@ var
   gg = lo.newgauge  # FG backup gauge
   g0 = lo.newgauge
   p0 = lo.newgauge
+  afield = lo.newgauge
+  bfield = lo.newgauge
   xi = 0.0
   xi1 = xi
   lnJ = 0.0
 
 proc revBegin =
   case mdalgo
+  of linp:
+    threads:
+      for mu in 0..<bfield.len:
+        bfield[mu] *= -1
   of nosehoover:
     xi1 = xi
     xi *= -1
@@ -216,6 +246,10 @@ proc revBegin =
 
 proc revEnd =
   case mdalgo
+  of linp:
+    threads:
+      for mu in 0..<bfield.len:
+        bfield[mu] *= -1
   of nosehoover:
     xi = xi1
   else:
@@ -224,6 +258,19 @@ proc revEnd =
 proc extraInit =
   lnJ = 0.0
   case mdalgo
+  of linp:
+    #echo "a: ", a, "  b: ", b
+    threads:
+      for mu in 0..<bfield.len:
+        bfield[mu].uniform(r)
+        for e in bfield[mu]:
+          afield[mu][e] := a
+          var bv: typeof(bfield[mu][e][0,0].re)
+          bv := b
+          bfield[mu][e][0,0].re = copysign(bv, 2*bfield[mu][e][0,0].re-1)
+          bfield[mu][e][0,0].im = 0
+      #echo "a2: ", afield.norm2
+      #echo "b2: ", bfield.norm2
   of nosehoover:
     xi = R.gaussian * sqrt(gamma)
   else:
@@ -485,8 +532,15 @@ proc rkint(t: float, f: auto): float =
     else: discard
   result = s
 
-proc getT(lam: auto, a: auto, s: float): float =
+var getTmaxN = 0
+proc getT(lam: auto, a: auto, s: float, bessels: var seq[float]): float =
   # dt = ds exp(-Re[a exp(lam s)])
+  template getBessel(k,x): float =
+    if k >= bessels.len:
+      for i in bessels.len..k:
+        bessels.add besselIn(i,x)
+    bessels[k]
+    #besselIn(k,x)
   let an2 = a.norm2
   if an2 == 0.0:
     return s
@@ -499,41 +553,57 @@ proc getT(lam: auto, a: auto, s: float): float =
   var z = em + 1
   var c = em/lam
   var ck = c
-  var t = s*besselI0(an)
-  #for k in 1..intsteps:
+  var t = s*getBessel(0,an)
   var nsmall = 0
   var k = 1
+  const ntmp = 100
+  var tmp {.noInit.}: array[ntmp, float]
+  tmp[0] = t
+  var itmp = 1
   while true:
     let ac = apk * ck
-    let dt = besselIn(k, an) * ac.re * (2.0/float(k))
+    let dt = getBessel(k,an) * ac.re * (2.0/float(k))
     t += dt
+    if itmp < ntmp:
+      tmp[itmp] = dt
+      inc itmp
+    else:
+      tmp[ntmp-1] += dt
+    #echo "t: ", t, "  ", dt
     #if abs(dt) < 1e-24 * abs(t): break
-    if abs(dt) < 1e-18 * abs(t): inc nsmall else: nsmall = 0
-    if nsmall >= 10: break
+    if abs(dt) < 1e-20 * abs(t): inc nsmall else: nsmall = 0
+    if nsmall >= 20: break
     apk *= ap
     ck = z*ck + c
     inc k
-  result = t
+  #echo "itmp: ", itmp
+  for i in countdown(itmp-1,0): result += tmp[i]
+  #threadCritical:
+  #  getTmaxN = max(getTmaxN, k)
+  #echo "done"
 
 var terr = 0.0
 var terrmax = 0.0
 var nterr = 0
 var serr = 0.0
 var serrmax = 0.0
-proc gupA(lam: auto, a: auto, t: float): float =
+proc gupA(lam: auto, aa: auto, t: float): float =
+  var a = a
   # s ~ t / I0(|a|)
-  let i0a = besselI0(sqrt(a.norm2))
+  let i0a = besselI0(sqrt(aa.norm2))
   let smag = t / i0a
   var t = t
   if reduceT and lam.im != 0.0:
     let tp = i0a * 2 * PI / abs(lam.im)
     t -= tp * trunc(t/tp)
     #echo "tp: ", tp, "  ", t
+  var ebg = (1-a)*exp(-bg)
   template dsdtImpl(y: float): float =
-    let ae = a * exp(y*lam)
-    exp(ae.re)
+    let ae = aa * exp(y*lam)
+    #exp(ae.re)
+    ebg+a*exp(ae.re)
   proc dsdt(y: float): float = dsdtImpl(y)
-  proc dsdt(t: float, y: float, ctx: NumContext[float, float]): float = dsdtImpl(y)
+  proc dsdtx(t: float, y: float, ctx: NumContext[float, float]): float = dsdtImpl(y)
   #result = rkint(t, dsdt)
   let s0 = 0.0
   let tspan = [t]
@@ -552,12 +622,22 @@ proc gupA(lam: auto, a: auto, t: float): float =
   let intg = "dopri54"
   #let intg = "tsit54"
   #let intg = "vern65"
-  let (t1, y1) = solveOde(dsdt, s0, tspan, odeOptions, integrator=intg)
+  let (t1, y1) = solveOde(dsdtx, s0, tspan, odeOptions, integrator=intg)
   result = y1[^1]
-  let tc = getT(lam,a,result)
-  #echo "err: ", tc - t, "  ", tc, "  ", t
-  let te = abs(tc-t)
-  let se = te*dsdt(result)
+  var te = 0.0
+  var se = 0.0
+  if a == 1:
+    var bessels = @[i0a]
+    let tc = getT(lam,aa,result,bessels)
+    #echo "err: ", tc - t, "  ", tc, "  ", t
+    te = abs(tc-t)
+    se = te*dsdt(result)
+  else:
+    a *= -1
+    ebg *= -1
+    let (t2, y2) = solveOde(dsdtx, result, tspan, odeOptions, integrator=intg)
+    a *= -1
+    se = abs(y2[^1])
   threadCritical:
     terr += te
     terrmax = max(terrmax, te)
@@ -565,6 +645,7 @@ proc gupA(lam: auto, a: auto, t: float): float =
     serrmax = max(serrmax, se)
     inc nterr
 
+var gupInvMaxN = 0
 proc gupInv(lam: auto, a: auto, t: float): float =
   let an2 = a.norm2
   if an2 == 0.0:
@@ -573,17 +654,20 @@ proc gupInv(lam: auto, a: auto, t: float): float =
     return t*exp(a.re)
   let an = sqrt(an2)
   let i0a = besselI0(an)
+  var bessels = @[i0a]
   var s0 = 0.0
   var t0 = 0.0
   var s1 = 2 * PI / abs(lam.im)
   var t1 = i0a * s1
   var t = t
   t -= t1 * trunc(t/t1)
+  var nit = 0
   var s = 0.0
   while true:
     s = 0.5*(s0+s1)
     if s==s0 or s==s1: break
-    let ts = getT(lam, a, s)
+    let ts = getT(lam, a, s, bessels)
+    inc nit
     #echo s, "  ", ts, "  ", t
     if ts == t: break
     if ts < t:
@@ -593,37 +677,62 @@ proc gupInv(lam: auto, a: auto, t: float): float =
       s1 = s
       t1 = ts
   result = s
-  let tc = getT(lam,a,result)
-  let te = abs(tc-t)
-  if te > 1e-12:
-    echo s, "  ", tc, "  ", t
-    echo s0, "  ", s, "  ", s1
-    echo t0, "  ", tc, "  ", t1
+  let tc = getT(lam,a,result,bessels)
+  let te = abs(tc-t) / t
+  if te > 1e-10:
+    echoAll "gupInv fail"
+    echoAll "  ", s, "  ", tc, "  ", t
+    echoAll "  ", s0, "  ", s, "  ", s1
+    echoAll "  ", t0, "  ", tc, "  ", t1
     let sa = gupA(lam, a, t)
-    let ta = getT(lam,a,sa)
-    echo sa, "  ", ta
+    let ta = getT(lam,a,sa,bessels)
+    echoAll "  ", sa, "  ", ta
   threadCritical:
     terr += te
     terrmax = max(terrmax, te)
     inc nterr
+    gupInvMaxN = max(gupInvMaxN, nit)
 
 proc gupI(lam: auto, a: auto, t: float): float =
-  var dt = t / intsteps
+  const nsteps = 1
+  var dt = t / nsteps
   var s = 0.0
   let i0a = besselI0(sqrt(a.norm2))
-  let ds0 = dt / i0a
+  #let dst = dt / i0a
+  #echoAll "dst: ", dst
   proc f(ds: float): float =
     let ae = a * exp((s+0.5*ds)*lam)
     result = dt * exp(ae.re) - ds
-  proc fd(ds: float): float =
-    let ae = a * exp((s+0.5*ds)*lam)
-    let aed = 0.5 * ae * lam
-    result = dt * exp(ae.re) * aed.re - 1.0
-  var lj = 0.0
-  for i in 1..intsteps:
+  #proc fd(ds: float): float =
+  #  let ae = a * exp((s+0.5*ds)*lam)
+  #  let aed = 0.5 * ae * lam
+  #  result = dt * exp(ae.re) * aed.re - 1.0
+  #var lj = 0.0
+  for i in 1..nsteps:
     # ds = dt dsdt(s+0.5*ds)
     # s1 = s0 + dt dsdt(0.5*(s0+s1)) => ds1 = ds0 + dt
-    let ds = newtons(f, fd, ds0, 1e-6)
+    #let ds = newtons(f, fd, ds0, 1e-6)
+    var ds0 = 0.0
+    var f0 = f(ds0)
+    #var ds1 = 0.01*dst
+    var ds1 = 0.1*dt
+    var f1 = f(ds1)
+    while f0*f1>0:
+      ds1 *= 2
+      #ds1 += 0.1*dst
+      f1 = f(ds1)
+    var ds = 0.0
+    while true:
+      ds = 0.5*(ds0+ds1)
+      if ds==ds0 or ds==ds1: break
+      let fds = f(ds)
+      if fds==0: break
+      if f0*fds>0:
+        ds0 = ds
+        f0 = fds
+      else:
+        ds1 = ds
+        f1 = fds
     s += ds
     #lj += 
   result = s
@@ -637,9 +746,18 @@ proc gupdateA(x,mu: int, t: float): auto =
   for i in 0..<vl:
     let li = eval(lam[asSimd(i)])
     let ai = eval(gp[1][asSimd(i)])
-    let si = gupA(li, ai, t)
-    #let si = gupInv(li, ai, t)
-    #let si = gupI(li, ai, t)
+    var si: float
+    if impl:
+      si = gupI(li, ai, t)
+      let ai2 = ai * exp(si*li)
+      let si2 = gupI(-li, ai2, t)
+      let err = 2*abs(si-si2)/(si+si2)
+      if err > 1e-10:
+        echoAll "gupI reverse: ", err, "  ", si, "  ", si2, "  ", t
+    elif adapt:
+      si = gupA(li, ai, t)
+    else:
+      si = gupInv(li, ai, t)
     #let (si,dsi) = gupI(li, ai, t)
     s[i] = si
     #lj[i] = lji
@@ -647,7 +765,8 @@ proc gupdateA(x,mu: int, t: float): auto =
   let u = f * g[mu][x]
   g[mu][x] := u
   let ae = gp[1] * exp(s*lam)
-  result = gp[1].re - ae.re
+  #result = gp[1].re - ae.re
+  result = ln(((1-a)+a*gp[0]*exp(gp[1].re))/((1-a)+a*gp[0]*exp(ae.re)))
   #result = lj
   # du = f dg + df g = f dg + g lam f ds
 
@@ -669,13 +788,24 @@ proc mdtfb(t:float, fb:int) =
             threadRankSum(lnJs)
             threadSingle: lnJ += lnJs
   else:
-    threads:
-      for i in 0..<g.len:
-        for e in g[i]:
-          let etpg = exp(t*p[i][e])*g[i][e]
-          g[i][e] := etpg
-    if mdalgo == nosehoover:
-      xi += t * gamma * (p.pnorm2 - dof)
+    case mdalgo
+    of linp:
+      threads:
+        for i in 0..<g.len:
+          for e in g[i]:
+            let pi = p[i][e][0,0].im
+            var ap = afield[i][e][0,0].re * p[i][e]
+            ap[0,0].im += bfield[i][e][0,0].re * (pi*pi-1)
+            let etpg = exp(t*ap)*g[i][e]
+            g[i][e] := etpg
+    else:
+      threads:
+        for i in 0..<g.len:
+          for e in g[i]:
+            let etpg = exp(t*p[i][e])*g[i][e]
+            g[i][e] := etpg
+      if mdalgo == nosehoover:
+        xi += t * gamma * (p.pnorm2 - dof)
 
 proc mdtf(t:float) =
   #let t = 0.25*t
@@ -702,7 +832,8 @@ proc mdt(t:float) =
 
 proc mdv(t:float) =
   if useG:
-    if not (mdalgo==gv and bg==beta):
+    if not (mdalgo==gv and bg==beta and a==1):
+      # (1-a) + a G
       gc.gaugeforce2(g, f)
       initg()
       #var f2 = 0.0
@@ -711,9 +842,10 @@ proc mdv(t:float) =
         for i in 0..<g.len:
           for e in g[i]:
             let gd = gfunderiv(e,i)
-            let tg = t*gd[0]
+            #let tg = t*gd[0]
+            let tg = t*((1-a) + a*gd[0])
             var ff = -tg * f[i][e]  # - to correct for sign of f
-            ff += t * gd[1]
+            ff += t * a * gd[1]
             p[i][e] += ff
             #f2t += ff.norm2
             #var f2s = simdSum(f2t)
@@ -722,21 +854,45 @@ proc mdv(t:float) =
       #echo "F2: ", f2 / g[0].l.physVol
   else:
     gc.gaugeforce2(g, f)
-    let etxi = exp(-0.5*t*xi)
-    if mdalgo == nosehoover:
+    case mdalgo
+    of linp:
+      let eps0 = eps
+      threads:
+        var lnJt: typeof(f[0][0][0,0].re)
+        for i in 0..<p.len:
+          for e in p[i]:
+            let tf = (-t)*f[i][e][0,0].im
+            let af = afield[i][e][0,0].re * tf
+            let bf = bfield[i][e][0,0].re * tf
+            let br = bfield[i][e][0,0].re
+            let bd = afield[i][e][0,0].re*br / (br*br+eps0)
+            let eb1 = expm1(bf)
+            p[i][e][0,0].re = 0
+            p[i][e][0,0].im = (eb1+1)*p[i][e][0,0].im + af + bd*(eb1-bf)
+            lnJt += bf
+        var lnJs = simdSum(lnJt)
+        threadRankSum(lnJs)
+        threadSingle: lnJ += lnJs
+    of nosehoover:
+      let etxi = exp(-0.5*t*xi)
       threads:
         for i in 0..<p.len:
           p[i] *= etxi
-    threads:
-      for i in 0..<f.len:
-        for e in f[i]:
-          let tf = (-t)*f[i][e]
-          p[i][e] += tf
-    if mdalgo == nosehoover:
+      threads:
+        for i in 0..<f.len:
+          for e in f[i]:
+            let tf = (-t)*f[i][e]
+            p[i][e] += tf
       threads:
         for i in 0..<p.len:
           p[i] *= etxi
       lnJ += dof*t*xi
+    else:
+      threads:
+        for i in 0..<f.len:
+          for e in f[i]:
+            let tf = (-t)*f[i][e]
+            p[i][e] += tf
 
 ####  end of area to modify to add new HMC variants  ###
 
@@ -813,9 +969,11 @@ proc obstat(Hvals, Jvals, Avals, Pvals, Qvals:seq[float], secs:float) =
       APvals[i] = a
   let pacc = APvals.jackknife(jkBlockSize, mean)
   let Pmean = Pvals.jackknife(jkBlockSize, mean)
-  let Pac = Pvals.jackknife(jkBlockSize, naiveIntAutocorr, 200)
+  #let Pac = Pvals.jackknife(jkBlockSize, naiveIntAutocorrL, 200)
+  let Pac = Pvals.jackknife(jkBlockSize, naiveIntAutocorr)
   let Qmean = Qvals.jackknife(jkBlockSize, mean)
-  let Qac = Qvals.jackknife(jkBlockSize, naiveIntAutocorr, 200)
+  #let Qac = Qvals.jackknife(jkBlockSize, naiveIntAutocorrL, 200)
+  let Qac = Qvals.jackknife(jkBlockSize, naiveIntAutocorr)
   let dQrms = Qvals.jackknife(jkBlockSize, tunnelingRate)
   let spt = secs / Qvals.len
 
@@ -841,7 +999,8 @@ proc obstat(Hvals, Jvals, Avals, Pvals, Qvals:seq[float], secs:float) =
     let a = Qvals[i]
     Q2vals[i] = a*a
   let Q2 = Q2vals.jackknife(jkBlockSize, mean)
-  let Q2ac = Q2vals.jackknife(jkBlockSize, naiveIntAutocorr, 200)
+  #let Q2ac = Q2vals.jackknife(jkBlockSize, naiveIntAutocorrL, 200)
+  let Q2ac = Q2vals.jackknife(jkBlockSize, naiveIntAutocorr)
 
   echo "lnJ = ", lnJ.mean, " ± ", lnJ.stdev
   echo "lnJrms = ", lnJrms.mean, " ± ", lnJrms.stdev
@@ -952,8 +1111,8 @@ proc mc =
       Jvals[n-1] = lnJ
       Pvals[n-1] = pl.re
       Qvals[n-1] = g.topo2DU1
-    qexLog "plaq: ",pl.re," ",pl.im," topo: ",Qvals[n-1]
-    qexLog "terr: ",terr/nterr,"  ",terrmax
+    qexLog "plaq: ",pl.re," ",pl.im," topo: ",(if n>0: Qvals[n-1] else: g.topo2DU1)
+    qexLog "terr: ",terr/nterr,"  ",terrmax,"  ",getTmaxN,"  ",gupInvMaxN
     qexLog "serr: ",serr/nterr,"  ",serrmax
     if n==0:
       terr = 0
