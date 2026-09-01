@@ -1,3 +1,16 @@
 *~
 /bin/
 nimcache/
+src/alphas/data/reference/
+nim-2.2.2/
+qio-3.0.0/
+qmp-2.5.4/
+qio/
+qmp/
+local/
+milc_qcd_upstream
+*.tar.gz
+*.tar.xz
+*.pre-leak-fix
+__pycache__/
+*.pyc

@@ -306,7 +306,6 @@ def catalogue(volume: str, coupling: str, mass: str, smear_bc: str) -> None:
         'cut':                        [],
         'per-file-cut':               [],
         'trajectories':               [],
-        'hosts':                      [],
         'nodes':                      [],
         'tasks-per-node':             [],
         'threads-per-task':           [],
@@ -345,7 +344,6 @@ def catalogue(volume: str, coupling: str, mass: str, smear_bc: str) -> None:
                         data['per-file-cut'].append(0 if starting_config > cut else 1)
                     if 'number of trajectories: ' in line:
                         data['trajectories'].append(int(spln[-1]))
-                    if 'host: ' in line: data['hosts'].append(spln[-1])
                     if 'nodes: ' in line:
                         try: data['nodes'].append(int(spln[-1]))
                         except ValueError: data['nodes'].append(1)
