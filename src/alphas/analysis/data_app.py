@@ -110,7 +110,13 @@ DATASETS = {
         '638': ['000', '0005', '00025', '0001']
     },
     '64': {
-        '160': ['000']
+        '100': ['000'],
+        '110': ['000'],
+        '120': ['000'],
+        '140': ['000'],
+        '160': ['000'],
+        '180': ['000'],
+        '200': ['000']
     }
 }
 
@@ -313,7 +319,11 @@ if os.path.exists(DATA_DIR + fn) and volume != 'all':
     tplaq = np.array(data['temporal plaquette'])
 
     # fcn(dH)
-    dH = np.array(data['dH']) #np.array([d for idx,d in enumerate(data['dH']) if not data['cut'][idx]])
+    dH = np.array(data['dH']) #np.array([d for idx,d in enumerate(data['dH']) if not data['cut'][idx]]
+    #data['cut'] = data['cut'][:-1:]
+    #data['dH'] = data['dH'][:-1:]
+    data['cut'] = [1] + [1]  + data['cut']
+    print(len(data['cut']), len(data['dH']))
     dH_cut = [d for idx,d in enumerate(data['dH']) if not data['cut'][idx]]
     #dH = np.array([dh if data['acceptance'][c] else 0.0 for c,dh in enumerate(data['dH'])])
     dH2 = dH*dH
