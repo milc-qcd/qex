@@ -143,7 +143,13 @@ DATA = {
         '638': ['000', '0005', '00025', '0001']
     },
     '64.64.64.128': {
-        '160': ['000']
+        '100': ['000'],
+        '110': ['000'],
+        '120': ['000'],
+        '140': ['000'],
+        '160': ['000'],
+        '180': ['000'],
+        '200': ['000']
     }
 }
 #"""
@@ -161,7 +167,8 @@ SGF: float
 SFI: float
 SFF: float
 
-def vol(volume: str) -> str: return ''.join(['l', volume.split('.')[0], 't', volume.split('.')[-1]])
+def vol(volume: str) -> str:
+    return ''.join(['l', volume.split('.')[0], 't', volume.split('.')[-1]])
 
 def configuration(f: str) -> int: return int(f.split('_')[-1].replace('.log', ''))
 
