@@ -578,14 +578,26 @@ proc uniform*(self: var SerialRNG): float32 =
 
 proc readRNG(self: var SerialRNG; fn: string) =
   var file = newFileStream(fn, fmRead)
-  if file.isNil: qexError "Was not able to read ", fn,  ". Exiting."
-  else: discard file.readData(self.milc.addr, self.milc.sizeof)
+  if file.isNil: qexFatal "Failed to open serial RNG file: ", fn
+  defer: file.close()
+  let expectedBytes = sizeof(self.milc)
+  var bytesRead: int
+  try: bytesRead = file.readData(self.milc.addr, expectedBytes)
+  except IOError as err:
+    qexFatal "Failed to read serial RNG file: ", fn, ": ", err.msg
+  if bytesRead != expectedBytes:
+    qexFatal "Incomplete serial RNG file: ", fn,
+      " (expected ", expectedBytes, " bytes, read ", bytesRead, ")"
 
 proc writeRNG(self: var SerialRNG; fn: string) =
-  var file = newFileStream(fn, fmWrite)
-  if file.isNil: qexError "Unable to write to ", fn,  ". Exiting."
-  else: file.write(self.milc)
-  file.flush
+  if myRank == 0:
+    # Unbuffered writes report errors in writeData; Nim's flush/close may discard them.
+    var file = newFileStream(fn, fmWrite, bufSize = 0)
+    if file.isNil: qexFatal "Failed to open serial RNG file: ", fn
+    defer: file.close()
+    try: file.writeData(self.milc.addr, sizeof(self.milc))
+    except IOError as err:
+      qexFatal "Failed to write serial RNG file: ", fn, ": ", err.msg
 
 proc writeSerialRNG*(self: var AlphasHMC; fn: string) = self.srng.writeRNG(fn)
 
