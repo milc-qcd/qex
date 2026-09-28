@@ -1,6 +1,6 @@
 import pathlib as path
 
-OUTPUT = path.Path('transfers') / 'stock.txt'
+OUTPUT = path.Path('logs') / 'stock.log'
 VOLUMES = [16, 20, 24, 32, 36, 40, 48, 64]
 
 def log_file(lat_file):
@@ -11,6 +11,7 @@ def log_file(lat_file):
         out_file.write(ens + '\n')
     
 def log_files(ens_dir):
+    print('working on: ', ens_dir)
     for f in ens_dir.iterdir():
         if str(f).endswith('.lat'): log_file(f)
             
