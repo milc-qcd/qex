@@ -1,5 +1,3 @@
-#RUNCMD env OMP_NUM_THREADS=2 $RUN1
-
 import math, strutils, unittest
 
 addOutputFormatter(newConsoleOutputFormatter(colorOutput = false))
@@ -8,7 +6,7 @@ addOutputFormatter(newConsoleOutputFormatter(colorOutput = false))
 import qex except epsilon
 import algorithms/numdiff, gauge/stoutsmear
 import helpers
-import ../[core, scalar, multi, gauge]
+import ../[core, scalar, multi, gauge, plan]
 import ../functional
 import ../gauge/types as graphGaugeShared
 import ../gauge/basic_ops as graphGaugeBasic
@@ -27,8 +25,9 @@ include gauge/gaugehelpers
 
 qexInit()
 
+letParam:
+  lat = latticeFromLocalLattice(@[4,4,8,8], nRanks)
 let
-  lat = @[8,8,8,16]
   lo = lat.newLayout
   seed = 1234567891u64
   vol = lo.physVol
@@ -50,6 +49,9 @@ threads:
 for i in 0..4:
   ss.smear(g, g)
   ss.smear(u, u)
+# The basic identities below require unitary fixture links.
+g.reunitGauge
+u.reunitGauge
 threads:
   for t in m:
     t *= 0.01
@@ -62,13 +64,14 @@ proc zeroGaugeLike(source: graphGaugeShared.Gauge): graphGaugeShared.Gauge =
   result = source.newOneOf
   graphGaugeShared.zeroGaugeStorage(result)
 
-include gauge/coeffs
-include gauge/basic
-include gauge/field
-include gauge/transport
-include gauge/fused_basic
-include gauge/fused
-include gauge/action
+when not declared(onlyHmc):
+  include gauge/coeffs
+  include gauge/basic
+  include gauge/field
+  include gauge/transport
+  include gauge/fused_basic
+  include gauge/fused
+  include gauge/action
 include hmcgauge/basic
 
 qexFinalize()

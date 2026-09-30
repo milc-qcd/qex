@@ -1,5 +1,6 @@
 import testutils
 import qex
+import std/tables
 
 qexInit()
 
@@ -66,23 +67,41 @@ suite "Test path plan":
     check(t.plan != t.plan(false))
 
   test "self consistent":
-    let pl = paths.optimalPairs.plan
-    var keys = newseq[seq[int]]()
-    for s in pl.steps:
-      check(s.key == fold(s.l, s.la) & fold(s.r, s.ra))
-      check(s.key.len > 1 and s.key notin keys)
-      for k in [s.l, s.r]:
-        check(k.len == 1 or k in keys)
-        if k.len == 1: check(k[0] > 0)
-      keys.add s.key
-    check(pl.outs.len == paths.len)
-    for i,o in pl.outs.pairs:
-      check(fold(o.key, o.adj) == paths[i])
-      check(o.key.len == 1 or o.key in keys)
-      if o.key.len == 1: check(o.key[0] > 0)
-    check(paths.optimalPairs.plan(false).steps == pl.steps)
-    for o in paths.optimalPairs.plan(false).outs:
-      check(o.sh.len == 0)
+    let loops = @[plq, rct, @[1,2,2,-1,-2,-2]]
+    for ps in [paths,
+        @[@[1,2,3,4], @[-4,-3,-2,-1], @[-4,-3,-2,-1],
+          @[1,2,3], @[-3,-2,-1], @[-3,-2,-1]],
+        loops & @[@[2,1,-2], @[-2,1,2], @[-1,2,1,1,-2],
+          @[-1,-2,1,1,2], @[2,1,1,-2,-1], @[-2,1,1,2,-1]],
+        loops & @[@[1,2,-1], @[-1,2,1], @[-2,1,2,2,-1],
+          @[-2,-1,2,2,1], @[1,2,2,-1,-2], @[-1,2,2,1,-2]]]:
+      checkpoint("paths " & $ps)
+      let pl = ps.optimalPairs.plan
+      var keys = newseq[seq[int]]()
+      for s in pl.steps:
+        check(s.key == fold(s.l, s.la) & fold(s.r, s.ra))
+        check(s.key.len > 1 and s.key notin keys)
+        for k in [s.l, s.r]:
+          check(k.len == 1 or k in keys)
+          if k.len == 1: check(k[0] > 0)
+        keys.add s.key
+      check(pl.outs.len == ps.len)
+      for i,o in pl.outs.pairs:
+        check(fold(o.key, o.adj) == ps[i])
+        check(o.key.len == 1 or o.key in keys)
+        if o.key.len == 1: check(o.key[0] > 0)
+      check(ps.optimalPairs.plan(false).steps == pl.steps)
+      for o in ps.optimalPairs.plan(false).outs:
+        check(o.sh.len == 0)
+
+  test "matrix symbols share products without geometric shifts":
+    let ps = @[@[1,2,3], @[1,2,4], @[-3,-2,-1]]
+    let pl = ps.optimalPairs.plan(shifts=false)
+    check pl.steps.len == 3
+    for step in pl.steps: check step.sh.len == 0
+    for i, outp in pl.outs:
+      check outp.sh.len == 0
+      check fold(outp.key,outp.adj) == ps[i]
 
   test "products":
     let
@@ -127,5 +146,73 @@ suite "Test path plan":
     threads:
       tmp := a * g[1].adj
     check(r[0] ~ tmp)
+
+  test "reversed pairs and repeated outputs retain their products":
+    let
+      p = @[1,2,-1,-2,1,2,-1,-2]
+      rp = fold(p, true)
+      paths = @[p, rp, p, plq, fold(plq, true)]
+      plan = paths.optimalPairs.plan
+      got = g.gaugeProd(paths.optimalPairs)
+    check(plan.outs[0].key == plan.outs[1].key)
+    check(plan.outs[0].adj != plan.outs[1].adj)
+    threads:
+      tmp := got[0].adj
+    check(got[1] ~ tmp)
+    check(got[2] ~ got[0])
+    threads:
+      tmp := got[3]*got[3]
+    check(got[0] ~ tmp)
+    threads:
+      tmp := got[3].adj
+    check(got[4] ~ tmp)
+
+  test "adjoint pairs give a minimal plan":
+    # Expected step counts are the fewest products with shared and adjoint reuse:
+    # a pair and its reverse are one product, (U1 U1)^dag reuses U1 U1, and the
+    # plaquette and rectangle share the pairs (1,2) and (-1,-2).
+    let rrct = @[2,1,1,-2,-1,-1]  # reversed rct
+    for (ps, n) in [(@[@[1,2], @[-2,-1], @[-2,-1]], 1),
+                    (@[plq, @[2,1,-2,-1]], 3),
+                    (@[plq, @[2,1,-2,-1], @[1,2], @[-2,-1]], 3),
+                    (@[rct], 4), (@[rct, rrct], 4),
+                    (@[plq, rct, rrct, @[2,1,-2,-1]], 6)]:
+      let pl = ps.optimalPairs.plan
+      checkpoint("paths " & $ps & " steps " & $pl.steps.len & " expected " & $n)
+      check(pl.steps.len == n)
+      var used = initCountTable[seq[int]]()
+      for s in pl.steps:
+        used.inc s.l
+        used.inc s.r
+      for o in pl.outs:
+        used.inc o.key
+      for s in pl.steps:
+        check(used[s.key] > 0)  # no dead products
+    let
+      ps = @[plq, @[2,1,-2,-1], @[1,2], @[-2,-1]]
+      pl = ps.optimalPairs.plan
+      r = g.gaugeProd(ps.optimalPairs)
+    check(pl.outs[0].key == pl.outs[1].key and pl.outs[0].adj != pl.outs[1].adj)
+    check(pl.outs[2].key == pl.outs[3].key and pl.outs[2].adj != pl.outs[3].adj)
+    check(pl.outs[2].key.len == 2)
+    threads:
+      tmp := r[0].adj
+    check(r[1] ~ tmp)
+    let r2 = g.gaugeProd(optimalPairs([rct, rrct]))
+    threads:
+      tmp := b * g[1].adj
+    check(r2[0] ~ tmp)
+    threads:
+      tmp := r2[0].adj
+    check(r2[1] ~ tmp)
+
+  test "a more frequent reversed pair makes planning progress":
+    # (AB)^dag = B^dag A^dag. Choosing A^dag B^dag matches no pair here.
+    let paths = @[@[1,2], @[-2,-1], @[-2,-1]]
+    let got = g.gaugeProd(paths.optimalPairs, false)
+    threads:
+      tmp := got[0].adj
+    check(got[1] ~ tmp)
+    check(got[2] ~ got[1])
 
 qexFinalize()

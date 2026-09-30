@@ -14,7 +14,6 @@ import scan
 import ../graph/core
 import ../graph/scalar
 import ../graph/gauge
-import ../graph/gauge/shared
 import ../graph/gauge/action/ops
 from ../graph/hmcgauge/config import validateRunConfig
 import ../graph/hmcgauge/trajectory
@@ -49,10 +48,10 @@ when isMainModule:
       mapFunctionDump: "", mapFunctionContexts: @[], monitorEvery: 1,
       checkMap: false, startWidth: -1.0))
     runConfig = gp.toRunConfig
-  runConfig.validateRunConfig
   installStandardParams()
   echoParams()
   processHelpParam()
+  runConfig.validateRunConfig
   if gp.lat.len != 2 or gp.lat[0] < 4 or gp.lat[1] < 4 or
       (gp.lat[0] and 1) != 0 or (gp.lat[1] and 1) != 0:
     raiseValueError("change-of-variables HMC needs an even two-dimensional lattice")
@@ -120,14 +119,14 @@ when isMainModule:
       dQchanged = newSeq[bool](runConfig.trajs)
       mdvals = newSeq[MdForceStats](runConfig.trajs)
 
-    proc proposalMon(traj: int; dH, acc: float) =
+    proc proposalMon(traj: int; proposal: Proposal) =
       proposalQValid = false
       let
         show = mp.monitorEvery > 0 and (traj-1) mod mp.monitorEvery == 0
         prod = traj > runConfig.trajsThermo
       if not (show or prod): return
       let
-        u = mapHost(graph.finalState.gauge.gaugeSnapshot, spec, layout).u
+        u = mapHost(proposal.gauge.gaugeSnapshot, spec, layout).u
         m = u.topoMaxP2DU1
         dq = int(round(m.topo-prevQ))
       proposalQ = m.topo

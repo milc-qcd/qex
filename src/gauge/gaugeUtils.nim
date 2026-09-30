@@ -412,16 +412,66 @@ proc echoPlaq*(g: auto) =
   for i in ns..<pl.len: pt += pl[i]
   echo "plaqS: ", 2*ps, "  plaqT: ", 2*pt, "  plaq: ", ps+pt
 
+# Fused gauge kernels. Each runs inside `threads` on the calling thread's site
+# partition, on one field or on every direction of a gauge. The destination
+# may alias an operand.
+
+proc contractProjectTAH*[F:Field](z: F; x, y: F) =
+  ## z = projectTAH(x y†) site by site.
+  for e in z:
+    let s = x[e] * y[e].adj
+    z[e].projectTAH s
+
+proc contractProjectTAH*[F:Field](z: F; x, y: F; sub: Subset) =
+  ## The same on sub's outer sites only.
+  for e in sub:
+    let s = x[e] * y[e].adj
+    z[e].projectTAH s
+
+proc contractProjectTAH*[F:Field](z: openArray[F]; x, y: openArray[F]) =
+  for mu in 0..<z.len: contractProjectTAH(z[mu], x[mu], y[mu])
+
 proc contractProjectTAH*[T](g:openArray[T], f:openArray[T]) =
-  ## f will be overwritten
+  ## f = projectTAH(g f†), in its own threads region.
   let nd = g.len
   let u = cast[ptr cArray[T]](unsafeAddr(g[0]))
   let o = cast[ptr cArray[T]](unsafeAddr(f[0]))
   threads:
     for mu in 0..<nd:
-      for e in o[mu]:
-        let s = u[mu][e]*o[mu][e].adj
-        o[mu][e].projectTAH s
+      contractProjectTAH(o[mu], u[mu], o[mu])
+
+proc axexp*[F:Field](z: F; a: float; x: F) =
+  ## z = exp(a x) site by site, with x anti-Hermitian (traceless for SU(N)).
+  for e in z:
+    var t {.noinit.}: evalType(x[e])
+    t[] := expAH(a * x[e][])
+    z[e] := t
+
+proc axexp*[F:Field](z: openArray[F]; a: float; x: openArray[F]) =
+  for mu in 0..<z.len: axexp(z[mu], a, x[mu])
+
+proc axexpmuly*[F:Field](z: F; a: float; x, y: F; expax: F = nil) =
+  ## z = exp(a x) y site by site, with x anti-Hermitian (traceless for SU(N));
+  ## expax, when given, receives exp(a x).
+  for e in z:
+    var t {.noinit.}: evalType(x[e])
+    t[] := expAH(a * x[e][])
+    if expax != nil: expax[e] := t
+    z[e] := t * y[e]
+
+proc axexpmuly*[F:Field](z: F; a: float; x, y: F; sub: Subset; expax: F = nil) =
+  ## The same on sub's outer sites only.
+  for e in sub:
+    var t {.noinit.}: evalType(x[e])
+    t[] := expAH(a * x[e][])
+    if expax != nil: expax[e] := t
+    z[e] := t * y[e]
+
+proc axexpmuly*[F:Field](z: openArray[F]; a: float; x, y: openArray[F]) =
+  for mu in 0..<z.len: axexpmuly(z[mu], a, x[mu], y[mu])
+
+proc axexpmuly*[F:Field](z: openArray[F]; a: float; x, y, expax: openArray[F]) =
+  for mu in 0..<z.len: axexpmuly(z[mu], a, x[mu], y[mu], expax[mu])
 
 type
   Link[F:ref] = object
@@ -831,13 +881,13 @@ proc mostSharedPair(paths:openarray[OrdPath]):(OrdPath,int) =
       if not (ps.k==opList and ps.s.len>1):
         continue
       var i = 0
-      while i<ps.s.len-1:  # FIXME test reversed
+      while i<ps.s.len-1:
         i.inc
         let t = OrdPath(k:opPair, l:ps.s[i-1], r:ps.s[i])
         let ft = t.flatten
         if c==0:
           p = t
-          pa = OrdPath(k:opPair, l:t.l.adjointOp, r:t.r.adjointOp)
+          pa = OrdPath(k:opPair, l:t.r.adjointOp, r:t.l.adjointOp)
           if p in pc or pa in pc:
             continue
           fp = p.flatten()
@@ -980,20 +1030,23 @@ proc trim(c:Coord):seq[int] =
   while result.len>0 and result[^1]==0:
     result.setLen(result.len-1)
 
-proc plan*(t:OrdPathTree, origin=true):PathPlan =
+proc plan*(t:OrdPathTree, origin=true, shifts=true):PathPlan =
   ## Steps in the order gaugeProd evaluates them, then one output per input path.
   ## origin=true shifts each output back to the path's starting site.
+  ## shifts=false treats integers as independent matrix symbols at one site.
   result.steps.newseq t.segments.len
   for i,s in t.segments.pairs:
     let
       (l,la) = operand s.l
       (r,ra) = operand s.r
-    result.steps[i] = PathStep(key:s.flatten, l:l, r:r, la:la, ra:ra, sh:trim(s.l.position - s.l.deltaX - s.r.position))
+    result.steps[i] = PathStep(key:s.flatten, l:l, r:r, la:la, ra:ra)
+    if shifts:
+      result.steps[i].sh = trim(s.l.position - s.l.deltaX - s.r.position)
   result.outs.newseq t.paths.len
   for i,p in t.paths.pairs:
     let (k,a) = operand p
     result.outs[i] = PathOut(key:k, adj:a)
-    if origin:
+    if origin and shifts:
       result.outs[i].sh = trim(-p.position)
 
 proc singleshift[F,S](f:F, sh:openarray[int], sf,sb:openarray[Shifter[F,S]]):F =
@@ -1040,7 +1093,6 @@ proc gaugeProd*(g:auto, ptree:OrdPathTree, origin=true):auto =
   ## Evaluate plan(ptree, origin) over the links g.
   ## Outputs alias the step products unless adjoint or shifted.
   tic("gaugeProd")
-  GC_fullCollect() # need to free space since we might allocate many fields
   type
     F = typeof(g[0])
     S = typeof(g[0][0])
@@ -1051,6 +1103,7 @@ proc gaugeProd*(g:auto, ptree:OrdPathTree, origin=true):auto =
     sf = newseq[Shifter[F,S]](nd)
     sb = newseq[Shifter[F,S]](nd)
     gp = initTable[seq[int],F]()
+    uses = initCountTable[seq[int]]()  # pending reads per step; zero counts are dropped and read back as 0
     sfi = newseq[bool](nd)
     sbi = newseq[bool](nd)
   template mark(sh:seq[int]) =
@@ -1061,8 +1114,11 @@ proc gaugeProd*(g:auto, ptree:OrdPathTree, origin=true):auto =
         sfi[mu] = true
   for s in pl.steps:
     mark s.sh
+    uses.inc s.l
+    uses.inc s.r
   for o in pl.outs:
     mark o.sh
+    uses.inc o.key
   for i in 0..<nd:
     if sfi[i]:
       sf[i] = newShifter(g[0], i, 1)
@@ -1072,6 +1128,12 @@ proc gaugeProd*(g:auto, ptree:OrdPathTree, origin=true):auto =
 
   proc node(k:seq[int]):F =
     if k.len==1: g[k[0]-1] else: gp[k]
+
+  proc consumed(k: seq[int]) =
+    if k.len > 1:
+      uses.inc(k, -1)
+      if uses[k] == 0:
+        gp.del k
 
   for s in pl.steps:
     let
@@ -1095,10 +1157,12 @@ proc gaugeProd*(g:auto, ptree:OrdPathTree, origin=true):auto =
           res.multishifts(sh, sf, sb)
       res.lrmul(l,rr,la,ra)
     gp[s.key] = res
+    consumed(s.l)
+    consumed(s.r)
   toc("gaugeProd prod")
   let n = pl.outs.len
   var res = newseq[F](n)
-  var resAlloc = newseq[bool](n)  # TODO: implement tracing ref counting
+  var resAlloc = newseq[bool](n)
   for i,o in pl.outs.pairs:
     let t = node o.key
     if o.adj:
@@ -1108,6 +1172,7 @@ proc gaugeProd*(g:auto, ptree:OrdPathTree, origin=true):auto =
         res[i] := t.adj
     else:
       res[i] = t
+    consumed(o.key)
   for i,o in pl.outs.pairs:
     let sh = o.sh
     var needs = 0
@@ -1456,6 +1521,27 @@ proc checkU*[F:Field](x: openArray[F]): tuple[avg,max:float] {.noinit.} =
   a = sqrt( a / (c*float(x.len*vol)) )
   b = sqrt( b / c )
   return (a, b)
+
+proc reunitGauge*[F:Field](g: seq[F]) =
+  ## Project each link onto its group: U(1) for Nc = 1, SU(N) otherwise.
+  const nc = g[0][0].nrows
+  threads:
+    when nc == 1:
+      g.projectU
+    else:
+      g.projectSU
+    threadBarrier()
+
+proc checkUnitary*[F:Field](g: seq[F]): tuple[avg, max: float] =
+  ## Mean/max link distance from U(1) or SU(N); does not modify g.
+  const nc = g[0][0].nrows
+  var a, m: float
+  threads:
+    let d = when nc == 1: g.checkU else: g.checkSU
+    threadMaster:
+      a = d.avg
+      m = d.max
+  (avg: a, max: m)
 
 proc checkSU*[F:Field](x: openArray[F]): tuple[avg,max:float] {.noinit.} =
   var a,b:float

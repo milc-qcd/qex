@@ -6,6 +6,9 @@ import layout
 import layout/shifts
 import gaugeUtils
 import staples
+import comms/halo
+import std/[tables, bitops]
+import base/alignedMem
 
 type
   GaugeActionCoeffs* = object
@@ -13,6 +16,14 @@ type
     rect*: float
     pgm*: float
     adjplaq*: float
+
+template requireFundamental(c: GaugeActionCoeffs, name: string) =
+  if c.adjplaq != 0:
+    raise newException(ValueError, name & " requires fundamental coefficients")
+
+template requireAdjoint(c: GaugeActionCoeffs, name: string) =
+  if c.rect != 0 or c.pgm != 0:
+    raise newException(ValueError, name & " supports plaquette and adjoint-plaquette coefficients only")
 
 proc `*`*(x: float, y: GaugeActionCoeffs): GaugeActionCoeffs =
   for r, v in fields(result, y):
@@ -49,19 +60,435 @@ proc Symanzik*(beta:float, c1:float = C1Symanzik):auto = gaugeActRect(beta, c1)
 proc Iwasaki*(beta:float, c1:float = C1Iwasaki):auto = gaugeActRect(beta, c1)
 proc DBW2*(beta:float, c1:float = C1DBW2):auto = gaugeActRect(beta, c1)
 
+type
+  LoopKind = enum lkPlaq, lkRect, lkPgm
+  GaugeLoop = object
+    path: array[5,int]
+    len: int
+    kind: LoopKind
+  GaugeLoops = seq[seq[GaugeLoop]]
+  GaugeLoopPlan = ref object
+    paths: GaugeLoops
+    fw, bw: seq[int32]
+    offsets: seq[seq[int32]]
+    products: array[6,LoopProducts]
+    factors: seq[tuple[mu:int, offset:seq[int32]]]
+    pairs: PathPlan
+    outputs: seq[tuple[mu:int, kind:LoopKind]]
+  LoopLoad = object
+    dest, mu, seed: int
+    offset: seq[int32]
+  LoopMul = object
+    dest, left, right: int
+    la, ra, add: bool
+  LoopOut = object
+    source, mu: int
+    kind: LoopKind
+    adj: bool
+  LoopProducts = ref object
+    loads: seq[LoopLoad]
+    steps: seq[LoopMul]
+    outs: seq[LoopOut]
+    size: int
+
+proc gaugeLoops(nd, mask, act: int): GaugeLoopPlan =
+  # Each open path runs from x to x+mu. Differentiating a closed loop
+  # contributes every occurrence, including repeated links after wrapping.
+  proc makeLoops(): GaugeLoops =
+    result.newSeq(nd)
+    template addLoop(p: untyped, family: LoopKind) =
+      block:
+        let path = p
+        for k in 0..(if act == 1: 0 else: path.len-1):
+          var loop = GaugeLoop(len: path.len-1, kind: family)
+          if path[k] > 0:
+            for j in 0..<loop.len:
+              loop.path[j] = -path[(k+path.len-1-j) mod path.len]
+          else:
+            for j in 0..<loop.len:
+              loop.path[j] = path[(k+1+j) mod path.len]
+          result[abs(path[k])-1].add loop
+    for mu in 2..nd:
+      for nu in 1..<mu:
+        if (mask and 4) != 0:
+          addLoop([mu,nu,-mu,-nu], lkPlaq)
+        if (mask and 1) != 0:
+          addLoop([mu,nu,nu,-mu,-nu,-nu], lkRect)
+          addLoop([mu,mu,nu,-mu,-mu,-nu], lkRect)
+        if (mask and 2) != 0:
+          for sg in 1..<nu:
+            # gaugeAction2's ts1, ts2, ts3, ts7, respectively.
+            addLoop([mu,nu,sg,-mu,-nu,-sg], lkPgm)
+            addLoop([mu,sg,nu,-mu,-sg,-nu], lkPgm)
+            addLoop([nu,mu,sg,-nu,-mu,-sg], lkPgm)
+            addLoop([mu,-nu,sg,-mu,nu,-sg], lkPgm)
+  # Paths and offsets depend only on topology. Construct this metadata and its
+  # derived product plans outside threads; evaluations share the cached plans.
+  var cache {.global.}: Table[(int,int,int),GaugeLoopPlan]
+  let key = (nd, mask, act)
+  if key notin cache:
+    let plan = GaugeLoopPlan(paths: makeLoops(), fw: newSeq[int32](nd), bw: newSeq[int32](nd))
+    for row in plan.paths:
+      for path in row:
+        var x = newSeq[int32](nd)
+        for k in 0..<path.len:
+          let step = path.path[k]
+          let mu = abs(step)-1
+          if step < 0: dec x[mu]
+          var off = newSeq[int32](nd)
+          for d in 0..<nd:
+            off[d] = x[d]
+            plan.fw[d] = max(plan.fw[d], x[d])
+            plan.bw[d] = max(plan.bw[d], -x[d])
+          if off notin plan.offsets: plan.offsets.add off
+          if step > 0: inc x[mu]
+    cache[key] = plan
+  cache[key]
+
+type
+  LoopHalos[V:static[int],T] = object
+    layout*: HaloLayout[Layout[V]]
+    fields*: seq[seq[Halo[Layout[V],Field[V,T],T]]]
+  LoopWork*[V:static[int],T] = ref object
+    ## Mutable loop buffers for one layout. Serialize calls using this object.
+    ## Geometry initialization follows the halo API's threading requirements.
+    lo*: Layout[V]
+    halos*: seq[LoopHalos[V,T]]
+    scratch: seq[Field[V,T]]
+    trans: array[4,seq[Transporter[Field[V,T],Field[V,T],T]]]
+    plan: LoopProducts
+    products: seq[alignedMem[T]]
+
+proc newLoopWork*[V:static[int],T](f: Field[V,T]): LoopWork[V,T] =
+  LoopWork[V,T](lo: f.l)
+
+proc useLoopWork(g: auto, work: LoopWork): auto =
+  result = if work.isNil: newLoopWork(g[0]) else: work
+  if result.lo != g[0].l:
+    raise newException(ValueError, "loop workspace requires its original layout")
+
+proc loopScratch(w: LoopWork): auto =
+  if w.scratch.len == 0:
+    w.scratch.newSeq(w.lo.nDim)
+    for mu in 0..<w.scratch.len: w.scratch[mu].new(w.lo)
+  w.scratch
+
+proc hessianTrans(w: LoopWork, g, h: auto): auto =
+  if g[0].l != w.lo or h[0].l != w.lo:
+    raise newException(ValueError, "Hessian workspace requires its original layout")
+  if w.trans[0].len == 0:
+    w.trans[0] = newTransporters(g, g[0], 1)
+    w.trans[1] = newTransporters(g, g[0], -1)
+    w.trans[2] = newTransporters(h, g[0], 1)
+    w.trans[3] = newTransporters(h, g[0], -1)
+  else:
+    w.trans[0].setLinks(g)
+    w.trans[1].setLinks(g)
+    w.trans[2].setLinks(h)
+    w.trans[3].setLinks(h)
+  (w.trans[0], w.trans[1], w.trans[2], w.trans[3])
+
+proc clearInputs(w: LoopWork) =
+  for row in w.trans.mitems: row.clearLinks
+  for row in w.halos:
+    for slot in row.fields:
+      for h in slot:
+        if h != nil: h.field = nil
+
+proc gaugeLoopHalo[V:static[int],T](w: LoopWork[V,T], g: openArray[Field[V,T]], plan: GaugeLoopPlan, slot: int): auto =
+  if g[0].l != w.lo:
+    raise newException(ValueError, "loop inputs require the workspace layout")
+  let
+    lo = g[0].l
+    nd = lo.nDim
+    comm = getDefaultComm()
+    hl = haloLayout(lo, plan.fw, plan.bw)
+    hm = haloMap(hl, comm, plan.offsets)
+  var row = 0
+  while row < w.halos.len and w.halos[row].layout != hl: inc row
+  if row == w.halos.len: w.halos.add LoopHalos[V,T](layout: hl)
+  if w.halos[row].fields.len <= slot:
+    w.halos[row].fields.setLen(max(2,slot+1))
+  if w.halos[row].fields[slot].len == 0:
+    w.halos[row].fields[slot].newSeq(nd)
+    for mu in 0..<nd:
+      w.halos[row].fields[slot][mu] = makeHalo(hl, g[mu])
+  let gh = w.halos[row].fields[slot]
+  for mu in 0..<nd:
+    gh[mu].field = g[mu]
+    gh[mu].update(hm, comm)
+  gh
+
+proc gaugeLoopProd(gh, hh: auto, path: GaugeLoop, i: int, deriv: static bool): auto =
+  mixin adj, load1
+  type M = type(load1(gh[0][0]))
+  const order = if deriv: 1 else: 0
+  var p: M
+  var j = i
+  template factor(a, k: untyped) =
+    let step = path.path[k]
+    let mu = abs(step)-1
+    if step < 0: j = gh[mu].layout.neighborBck[mu][j]
+    forStatic d, 0, order:
+      when d == 0:
+        if step > 0: a[d] := gh[mu][j]
+        else: a[d] := gh[mu][j].adj
+      else:
+        if step > 0: a[d] := hh[mu][j]
+        else: a[d] := hh[mu][j].adj
+    if step > 0 and k < path.path.high: j = gh[mu].layout.neighborFwd[mu][j]
+  productJet(p, path.path.len, order, factor)
+  p
+
+proc pgmAction[T](c: GaugeActionCoeffs, g: openArray[T], work: auto): float =
+  let nd = g[0].l.nDim
+  if nd < 3 or c.pgm == 0: return
+  let w = useLoopWork(g, work)
+  defer: w.clearInputs
+  let
+    plan = gaugeLoops(nd, 2, 1)
+    gh = w.gaugeLoopHalo(g, plan, 0)
+  var sums = newSeq[float](getMaxThreads())
+  threads:
+    var s = 0.0
+    for mu in 0..<nd:
+      for i in gh[0].field:
+        for path in plan.paths[mu]:
+          let p = gaugeLoopProd(gh, gh, path, i, false)
+          s += simdSum(redot(gh[mu][i], p))
+    sums[threadNum] = s
+  for s in sums: result += s
+  rankSum(result)
+  result *= -c.pgm / float(g[0][0].nrows)
+
+proc gaugeLoopDeriv[T](c: GaugeActionCoeffs, g, h: openArray[T], f: array|seq, deriv: static bool, work: auto) =
+  # d(prod A_k) = sum_k A_0...dA_k...A_4, with no seed storage in
+  # the ordinary gradient. All target links are local, so writes are disjoint.
+  let nd = g[0].l.nDim
+  let mask = (if c.rect != 0: 1 else: 0) + (if c.pgm != 0 and nd >= 3: 2 else: 0)
+  if mask == 0: return
+  let w = useLoopWork(g, work)
+  defer: w.clearInputs
+  let
+    plan = gaugeLoops(nd, mask, 0)
+    gh = w.gaugeLoopHalo(g, plan, 0)
+    nc = float(g[0][0].nrows)
+  when deriv:
+    let hh = w.gaugeLoopHalo(h, plan, 1)
+  threads:
+    for mu in 0..<nd:
+      for i in gh[0].field:
+        var s: type(load1(gh[0][0]))
+        s := 0
+        for path in plan.paths[mu]:
+          let a = (if path.kind == lkRect: c.rect else: c.pgm) / nc
+          when deriv:
+            s += a*gaugeLoopProd(gh, hh, path, i, true)
+          else:
+            s += a*gaugeLoopProd(gh, gh, path, i, false)
+        f[mu][i] += s
+
+proc loopMask(c: GaugeActionCoeffs, nd: int): int =
+  (if c.plaq != 0 and nd > 1: 4 else: 0) or
+  (if c.rect != 0 and nd > 1: 1 else: 0) or
+  (if c.pgm != 0 and nd > 2: 2 else: 0)
+
+proc loopCoeff(c: GaugeActionCoeffs, kind: LoopKind): float =
+  case kind
+  of lkPlaq: c.plaq
+  of lkRect: c.rect
+  of lkPgm: c.pgm
+
+proc loopProducts(plan: GaugeLoopPlan, order: int): LoopProducts =
+  # A symbol identifies U_mu(x+offset); its sign denotes adjoint. All symbols
+  # already refer to the same output site, so the pair planner needs no shifts.
+  if plan.products[order] != nil: return plan.products[order]
+  let p = LoopProducts()
+  if plan.pairs.outs.len == 0:
+    var
+      symbols: Table[(int,seq[int32]),int]
+      words: seq[seq[int]]
+    for mu, row in plan.paths:
+      for path in row:
+        var x = newSeq[int32](plan.fw.len)
+        var word: seq[int]
+        for k in 0..<path.len:
+          let step = path.path[k]
+          let dir = abs(step)-1
+          if step < 0: dec x[dir]
+          var off = newSeq[int32](x.len)
+          for d in 0..<x.len: off[d] = x[d]
+          let symbol = (dir,off)
+          if symbol notin symbols:
+            plan.factors.add (dir,off)
+            symbols[symbol] = plan.factors.len
+          let id = symbols[symbol]
+          word.add(if step > 0: id else: -id)
+          if step > 0: inc x[dir]
+        words.add word
+        plan.outputs.add (mu,path.kind)
+    plan.pairs = words.optimalPairs.plan(shifts=false)
+  let pairs = plan.pairs
+  var nodes: Table[seq[int],PathStep]
+  for step in pairs.steps: nodes[step.key] = step
+  var jets: Table[(seq[int],int),int]
+  proc jet(word: seq[int], mask: int): int =
+    let key = (word,mask)
+    if key in jets: return jets[key]
+    if word.len == 1:
+      let f = plan.factors[word[0]-1]
+      result = p.size
+      inc p.size
+      p.loads.add LoopLoad(dest:result,mu:f.mu,seed:firstSetBit(mask),offset:f.offset)
+    else:
+      # (AB)_S = sum_{T subset S} A_T B_{S\T}. Only reachable coefficients
+      # are built, including at the top degree where no primal loads remain.
+      let step = nodes[word]
+      var terms: seq[LoopMul]
+      var sub = mask
+      while true:
+        if countSetBits(sub) <= step.l.len and countSetBits(mask xor sub) <= step.r.len:
+          let left = jet(step.l,sub)
+          let right = jet(step.r,mask xor sub)
+          terms.add LoopMul(left:left,right:right,la:step.la,ra:step.ra,add:terms.len>0)
+        if sub == 0: break
+        sub = (sub-1) and mask
+      result = p.size
+      inc p.size
+      for term in terms.mitems:
+        term.dest = result
+        p.steps.add term
+    jets[key] = result
+  for i, outp in pairs.outs:
+    p.outs.add LoopOut(source:jet(outp.key,(1 shl order)-1),
+      mu:plan.outputs[i].mu,kind:plan.outputs[i].kind,adj:outp.adj)
+  plan.products[order] = p
+  p
+
+proc prepareProducts(w: LoopWork, plan: LoopProducts) =
+  w.plan = plan
+  let nt = getMaxThreads()
+  if w.products.len < nt: w.products.setLen(nt)
+  for tid in 0..<nt:
+    if w.products[tid].len < plan.size+w.lo.nDim:
+      w.products[tid].newU(plan.size+w.lo.nDim)
+
+proc evalProducts(plan: LoopProducts, h: auto, i: int, values: auto) =
+  for op in plan.loads:
+    let hl = h[op.seed][op.mu].layout
+    var j = i
+    for d, n in op.offset:
+      if n > 0:
+        for _ in 0..<int(n): j = hl.neighborFwd[d][j]
+      elif n < 0:
+        for _ in 0..<int(-n): j = hl.neighborBck[d][j]
+    values[op.dest] := h[op.seed][op.mu][j]
+  for op in plan.steps:
+    template multiply(a,b: untyped) =
+      if op.add: values[op.dest] += a*b
+      else: values[op.dest] := a*b
+    if op.la:
+      if op.ra: multiply(values[op.left].adj,values[op.right].adj)
+      else: multiply(values[op.left].adj,values[op.right])
+    else:
+      if op.ra: multiply(values[op.left],values[op.right].adj)
+      else: multiply(values[op.left],values[op.right])
+
+proc loopAction*[V:static[int],T](c: GaugeActionCoeffs, g: openArray[Field[V,T]]; work: LoopWork[V,T] = nil): float =
+  ## Fused S = -sum(c_loop Re tr U_loop)/Nc for fundamental loop terms.
+  requireFundamental(c, "loopAction")
+  let nd = g[0].l.nDim
+  if g.len != nd: raise newException(ValueError, "loop action requires a complete gauge bundle")
+  let mask = loopMask(c,nd)
+  if mask == 0: return
+  let w = useLoopWork(g,work)
+  defer: w.clearInputs
+  let plan = gaugeLoops(nd,mask,1)
+  let products = loopProducts(plan,0)
+  w.prepareProducts(products)
+  let h = [w.gaugeLoopHalo(g,plan,0)]
+  var sums = newSeq[array[3,float]](getMaxThreads())
+  let u = cast[ptr cArray[Field[V,T]]](unsafeAddr(g[0]))
+  threads:
+    let values = w.products[threadNum]
+    var s: array[3,float]
+    for i in u[0]:
+      products.evalProducts(h,i,values)
+      for outp in products.outs:
+        if outp.adj:
+          s[ord(outp.kind)] += simdSum(redot(u[outp.mu][i],values[outp.source].adj))
+        else:
+          s[ord(outp.kind)] += simdSum(redot(u[outp.mu][i],values[outp.source]))
+    sums[threadNum] = s
+  var total: array[3,float]
+  for s in sums:
+    for k in 0..<3: total[k] += s[k]
+  rankSum(total)
+  -(c.plaq*total[0]+c.rect*total[1]+c.pgm*total[2])/float(g[0][0].nrows)
+
+proc loopDeriv*[V:static[int],T,H; K:static int](c: GaugeActionCoeffs, g:openArray[Field[V,T]], ds:array[K,H], f:array|seq; work:LoopWork[V,T] = nil) =
+  ## f = D^K grad S(g)[ds]. The seed count is static; orders above degree vanish.
+  ## Output must be disjoint from seeds and, below the polynomial degree, g.
+  requireFundamental(c, "loopDeriv")
+  let lo = g[0].l
+  let nd = lo.nDim
+  if g.len != nd or f.len != nd or f[0].l != lo:
+    raise newException(ValueError, "loop derivative requires matching gauge bundles")
+  for d in ds:
+    if d.len != nd or d[0].l != lo:
+      raise newException(ValueError, "loop derivative seeds require matching gauge bundles")
+  var mask = loopMask(c,nd)
+  when K > 3: mask = mask and 3
+  let degree = if (mask and 3) != 0: 5 else: 3
+  if mask == 0 or K > degree:
+    threads:
+      for mu in 0..<nd: f[mu] := 0
+    return
+  template disjoint(src: untyped) =
+    for a in f:
+      for b in src:
+        if a.s.data == b.s.data:
+          raise newException(ValueError, "loop derivative output must not alias an input")
+  if K < degree: disjoint(g)
+  for d in ds: disjoint(d)
+  let w = useLoopWork(g,work)
+  defer: w.clearInputs
+  let plan = gaugeLoops(nd,mask,0)
+  let products = loopProducts(plan,K)
+  w.prepareProducts(products)
+  type HaloRow = type(w.gaugeLoopHalo(g,plan,0))
+  var h: array[K+1,HaloRow]
+  if K < degree: h[0] = w.gaugeLoopHalo(g,plan,0)
+  for k in 0..<K: h[k+1] = w.gaugeLoopHalo(ds[k],plan,k+1)
+  let nc = float(g[0][0].nrows)
+  threads:
+    let values = w.products[threadNum]
+    for i in f[0]:
+      products.evalProducts(h,i,values)
+      for mu in 0..<nd: values[products.size+mu] := 0
+      for outp in products.outs:
+        let a = -loopCoeff(c,outp.kind)/nc
+        if outp.adj: values[products.size+outp.mu] += a*values[outp.source].adj
+        else: values[products.size+outp.mu] += a*values[outp.source]
+      for mu in 0..<nd: f[mu][i] := values[products.size+mu]
+
+proc loopDeriv*[V:static[int],T](c: GaugeActionCoeffs, g:openArray[Field[V,T]], f:array|seq; work:LoopWork[V,T] = nil) =
+  let ds = default(array[0,seq[Field[V,T]]])
+  c.loopDeriv(g,ds,f,work)
+
 # plaq: 6 types
 # rect: 12 types
-# pgm: 32=4*2*4=4*3*2+4*2 types
+# pgm: 32=4*2*4=4*3*2+4*2 types, via pgmAction
 # shift corners: u[mu],nu mu != nu (12)
 # make staples: s[mu][nu] mu != nu (12)
 # plaq traces:
 #  plaq: U[mu]^+ * sum_{nu!=mu} s[mu][nu] (6)
 #  rect: shift(s[mu][nu], nu) (12 shifts)
-#  pgm: shift(s[mu][nu], sig) (24 shifts)
-proc gaugeAction1*[T](c: GaugeActionCoeffs, uu: openarray[T]): auto =
+proc gaugeAction1*[V:static[int],T](c: GaugeActionCoeffs, uu: openArray[Field[V,T]]; work: LoopWork[V,T] = nil): auto =
+  requireFundamental(c, "gaugeAction1")
   mixin mul, redot, load1
   tic("gaugeAction1")
-  let u = cast[ptr cArray[T]](unsafeAddr(uu[0]))
+  let u = cast[ptr cArray[Field[V,T]]](unsafeAddr(uu[0]))
   let lo = u[0].l
   let nd = lo.nDim
   #let np = (nd*(nd-1)) div 2
@@ -71,7 +498,7 @@ proc gaugeAction1*[T](c: GaugeActionCoeffs, uu: openarray[T]): auto =
   var
     stf, stu: FieldArray[type(u[0]).V, type(u[0]).T]
     ss: seq[seq[ShiftB[type(uu[0][0])]]]
-  if c.rect == 0 and c.pgm == 0:
+  if c.rect == 0:
     stf = makeFwdStaples(uu, cs)
   else:
     (stf, stu, ss) = makeStaples(uu, cs)
@@ -80,13 +507,12 @@ proc gaugeAction1*[T](c: GaugeActionCoeffs, uu: openarray[T]): auto =
   #toc("gaugeAction startStapleShifts")
   let maxThreads = getMaxThreads()
   var nth = 0
-  var act = newSeq[float](3*maxThreads)
+  var act = newSeq[float](2*maxThreads)
   toc("gaugeAction setup")
   threads:
     tic()
     var plaq = 0.0
     var rect = 0.0
-    var pgm = 0.0
     for ir in u[0]:
       for mu in 1..<nd:
         for nu in 0..<mu:
@@ -107,8 +533,7 @@ proc gaugeAction1*[T](c: GaugeActionCoeffs, uu: openarray[T]): auto =
               let r = redot(bnu, stf[nu,mu][ir])
               rect += simdSum(r)
     toc("gaugeAction local")
-    if c.rect != 0 or c.pgm != 0:
-      # makeStaples starts ss even when only pgm is set.
+    if c.rect != 0:
       for mu in 1..<nd:
         for nu in 0..<mu:
           var needBoundary = false
@@ -129,36 +554,32 @@ proc gaugeAction1*[T](c: GaugeActionCoeffs, uu: openarray[T]): auto =
                 # rect
                 let r = redot(bnu, stf[nu,mu][ir])
                 rect += simdSum(r)
-    act[threadNum*3]   = plaq
-    act[threadNum*3+1] = rect
-    act[threadNum*3+2] = pgm
+    act[threadNum*2]   = plaq
+    act[threadNum*2+1] = rect
     if threadNum==0: nth = numThreads
     # toc("gaugeAction boundary")
   toc("gaugeAction threads")
-  var a = [0.0, 0.0, 0.0]
+  var a = [0.0, 0.0]
   for i in 0..<nth:
-    a[0] += act[i*3]
-    a[1] += act[i*3+1]
-    a[2] += act[i*3+2]
-  #for i in 0..<3:
-  #  a[i] = a[i]/(lo.physVol.float*float(np*nc))
+    a[0] += act[i*2]
+    a[1] += act[i*2+1]
   rankSum(a)
-  #echo "plaq: ", a[0]
-  #echo "rect: ", a[1]
-  #echo "pgm: ", a[2]
-  result = (-1.0/nc.float) * (c.plaq*a[0] + c.rect*a[1] + c.pgm*a[2])
+  result = (-1.0/nc.float) * (c.plaq*a[0] + c.rect*a[1])
+  if c.pgm != 0:
+    result += pgmAction(c, uu, work)
   toc("gaugeAction end")
 
 proc gaugeAction1*[T](uu: openarray[T]): auto =
   let gc = GaugeActionCoeffs(plaq:1.0)
   return gc.gaugeAction1(uu)
 
-proc gaugeActionDeriv*[T](c: GaugeActionCoeffs, uu: openArray[T], f: array|seq, accumulate=false) =
+proc gaugeActionDeriv*[V:static[int],T](c: GaugeActionCoeffs, uu: openArray[Field[V,T]], f: array|seq, accumulate=false; work: LoopWork[V,T] = nil) =
   ## if accumulate, the derivatives will add to f.
   ## if not, f is set to 0 first.
+  requireFundamental(c, "gaugeActionDeriv")
   mixin load1, adj
   tic("gaugeActionDeriv")
-  let u = cast[ptr cArray[T]](unsafeAddr(uu[0]))
+  let u = cast[ptr cArray[Field[V,T]]](unsafeAddr(uu[0]))
   let lo = u[0].l
   let nd = lo.nDim
   #let np = (nd*(nd-1)) div 2
@@ -337,11 +758,13 @@ proc gaugeActionDeriv*[T](c: GaugeActionCoeffs, uu: openArray[T], f: array|seq, 
                 var b: type(load1(u[0][0]))
                 getSB(sb[nu][mu], ir, assign(b,it), ru[nu,mu][ix])
                 f[nu][ir] += cr * b
+  if c.pgm != 0:
+    gaugeLoopDeriv(GaugeActionCoeffs(pgm: c.pgm), uu, uu, f, false, work)
   toc("end")
 
-proc gaugeForce*[T](c: GaugeActionCoeffs, uu: openArray[T], f: array|seq) =
+proc gaugeForce*[V:static[int],T](c: GaugeActionCoeffs, uu: openArray[Field[V,T]], f: array|seq; work: LoopWork[V,T] = nil) =
   tic("gaugeForce")
-  gaugeActionDeriv(c, uu, f)
+  gaugeActionDeriv(c, uu, f, work=work)
   toc("gaugeActionDeriv")
   contractProjectTAH(uu, f)
   toc("gaugeForce end")
@@ -358,6 +781,7 @@ proc gaugeForce*(f,g: array|seq) =
   gaugeForce(c,g,f)
 
 proc gaugeAction2*(c: GaugeActionCoeffs, g: array|seq): auto =
+  requireFundamental(c, "gaugeAction2")
   mixin redot
   tic("gaugeAction2")
   const nc = g[0][0].nrows
@@ -415,7 +839,8 @@ proc gaugeAction2*(g: array|seq): auto =
   var c = GaugeActionCoeffs(plaq:1.0)
   gaugeAction2(c, g)
 
-proc gaugeDeriv2*(c: GaugeActionCoeffs, g,f: array|seq) =
+proc gaugeDeriv2*[V:static[int],T](c: GaugeActionCoeffs, g: openArray[Field[V,T]], f: array|seq; work: LoopWork[V,T] = nil) =
+  requireFundamental(c, "gaugeDeriv2")
   mixin adj
   tic("gaugeDeriv2")
   let lo = g[0].l
@@ -429,33 +854,56 @@ proc gaugeDeriv2*(c: GaugeActionCoeffs, g,f: array|seq) =
   let td = newTransporters(g, g[0], -1)
   let td2 = newTransporters(g, g[0], -1)
   toc("gaugeForce2 setup")
+  let u = cast[ptr cArray[Field[V,T]]](unsafeAddr(g[0]))
   threads:
     for mu in 0..<nd:
       #let mu = (mux + 1) mod nd
       #f[mu] := 0
       for nu in 0..<nd:
         if nu==mu: continue
-        discard t[nu] ^* g[mu]
-        shiftExpr(t[mu].sb, f[mu][ir] += cp * t[nu].field[ir]*adj(it), g[nu][ix])
-        f[mu] += cp * td[nu] ^* t[mu] ^* g[nu]
+        discard t[nu] ^* u[mu]
+        shiftExpr(t[mu].sb, f[mu][ir] += cp * t[nu].field[ir]*adj(it), u[nu][ix])
+        f[mu] += cp * td[nu] ^* t[mu] ^* u[nu]
         if cr != 0:
-          discard t2[nu] ^* t[nu] ^* g[mu]
-          discard tg[nu] ^* g[nu]
+          discard t2[nu] ^* t[nu] ^* u[mu]
+          discard tg[nu] ^* u[nu]
           shiftExpr(t[mu].sb, f[mu][ir] += cr * t2[nu].field[ir]*adj(it), tg[nu].field[ix])
-          f[mu] += cr * td2[nu] ^* td[nu] ^* tg[mu] ^* t[nu] ^* g[nu]
-          f[mu] += cr * td2[mu] ^* td[nu] ^* tg[mu] ^* t[mu] ^* g[nu]
-          discard td[nu] ^* tg[mu] ^* t[mu] ^* g[nu]
-          shiftExpr(t2[mu].sb, f[mu][ir] += cr * td[nu].field[ir]*adj(it), g[mu][ix])
-          discard td[mu] ^* t[nu] ^* tg[mu] ^* g[mu]
-          shiftExpr(t2[mu].sb, f[mu][ir] += cr * td[mu].field[ir]*adj(it), g[nu][ix])
+          f[mu] += cr * td2[nu] ^* td[nu] ^* tg[mu] ^* t[nu] ^* u[nu]
+          f[mu] += cr * td2[mu] ^* td[nu] ^* tg[mu] ^* t[mu] ^* u[nu]
+          discard td[nu] ^* tg[mu] ^* t[mu] ^* u[nu]
+          shiftExpr(t2[mu].sb, f[mu][ir] += cr * td[nu].field[ir]*adj(it), u[mu][ix])
+          discard td[mu] ^* t[nu] ^* tg[mu] ^* u[mu]
+          shiftExpr(t2[mu].sb, f[mu][ir] += cr * td[mu].field[ir]*adj(it), u[nu][ix])
+          # Back-to-back shifts through one buffer need every thread done with
+          # the previous receive before the next one is posted (see gaugeForce2).
+          threadBarrier()
           shiftExpr(t2[mu].sb, f[mu][ir] += cr * t[nu].field[ir]*adj(it), t[mu].field[ix])
+  if c.pgm != 0:
+    gaugeLoopDeriv(GaugeActionCoeffs(pgm: -c.pgm), g, g, f, false, work)
   toc("end")
 
-proc gaugeDeriv2SubsetWork*(c: GaugeActionCoeffs, g, f: array|seq, sd, sf, sb: auto, parity, dir: int, clear: static bool) =
-  ## f[dir]|P = D_plaq(g)|P; other directions are unchanged.
-  ## clear=false requires f[dir]|~P = 0.
-  if c.rect != 0 or c.pgm != 0 or c.adjplaq != 0:
-    raise newException(ValueError, "gaugeDeriv2SubsetWork supports plaquette coefficients only")
+proc gaugeDerivSubset[V:static[int],T](c: GaugeActionCoeffs, g: openArray[Field[V,T]], f: array|seq, parity, dir: int, clear: static bool; work: LoopWork[V,T] = nil) =
+  # Full derivative into workspace scratch, then select the requested links.
+  let
+    w = useLoopWork(g, work)
+    d = w.loopScratch
+    sub = g[0].l.getSubset(if parity == 0: "even" else: "odd")
+  gaugeActionDeriv(-1.0*c, g, d, work=w)
+  threads:
+    for x in f[dir]:
+      if x >= sub.lowOuter and x < sub.highOuter:
+        f[dir][x] := d[dir][x]
+      else:
+        when clear: f[dir][x] := 0
+
+proc gaugeDeriv2SubsetWork*[V:static[int],T](c: GaugeActionCoeffs, g: openArray[Field[V,T]], f: array|seq, sd, sf, sb: auto, parity, dir: int, clear: static bool; work: LoopWork[V,T] = nil) =
+  ## f[dir]|P = D(g)|P; other directions are unchanged.
+  ## clear=false preserves f[dir]|~P; clear=true sets it to zero.
+  ## rect/pgm coefficients take the full-derivative route and ignore sd, sf, sb.
+  requireFundamental(c, "gaugeDeriv2SubsetWork")
+  if c.rect != 0 or c.pgm != 0:
+    gaugeDerivSubset(c, g, f, parity, dir, clear, work)
+    return
   mixin adj
   tic("gaugeDeriv2Subset")
   let lo = g[0].l
@@ -466,6 +914,7 @@ proc gaugeDeriv2SubsetWork*(c: GaugeActionCoeffs, g, f: array|seq, sd, sf, sb: a
     let other = lo.getSubset(if parity == 0: "odd" else: "even")
   let firstNu = if dir == 0: 1 else: 0
   toc("gaugeDeriv2Subset setup")
+  let u = cast[ptr cArray[Field[V,T]]](unsafeAddr(g[0]))
   threads:
     when clear:
       for x in other:
@@ -473,61 +922,105 @@ proc gaugeDeriv2SubsetWork*(c: GaugeActionCoeffs, g, f: array|seq, sd, sf, sb: a
     for nu in 0..<nd:
       if nu == dir: continue
 
-      discard sd ^*! g[nu]
+      discard sd ^*! u[nu]
       threadBarrier()
       if nu == firstNu:
-        shiftExpr(sf[nu], f[dir][ir] := cp * (g[nu][ir] * it) * adj(sd.field[ir]), g[dir][ix])
+        shiftExpr(sf[nu], f[dir][ir] := cp * (u[nu][ir] * it) * adj(sd.field[ir]), u[dir][ix])
       else:
-        shiftExpr(sf[nu], f[dir][ir] += cp * (g[nu][ir] * it) * adj(sd.field[ir]), g[dir][ix])
+        shiftExpr(sf[nu], f[dir][ir] += cp * (u[nu][ir] * it) * adj(sd.field[ir]), u[dir][ix])
       # := and += may use different shift partitions.
       threadBarrier()
       toc("gaugeDeriv2Subset forward")
-      shiftExpr(sb[nu], f[dir][ir] += cp*it, g[nu][ix].adj * (g[dir][ix] * sd.field[ix]))
+      shiftExpr(sb[nu], f[dir][ir] += cp*it, u[nu][ix].adj * (u[dir][ix] * sd.field[ix]))
       threadBarrier()
       toc("gaugeDeriv2Subset backward")
   toc("gaugeDeriv2Subset end")
 
-proc gaugeDeriv2Subset*(c: GaugeActionCoeffs, g, f: array|seq, parity, dir: int) =
-  ## f[dir]|P = D_plaq(g)|P. Plaquette-only.
+proc gaugeDeriv2Subset*[V:static[int],T](c: GaugeActionCoeffs, g: openArray[Field[V,T]], f: array|seq, parity, dir: int; work: LoopWork[V,T] = nil) =
+  ## f[dir]|P = D(g)|P; other directions are unchanged.
+  if c.rect != 0 or c.pgm != 0:
+    gaugeDerivSubset(c, g, f, parity, dir, true, work)
+    return
   let ps = if parity == 0: "even" else: "odd"
   let sd = newShifter(g[0], dir, 1)
   let sf = createShiftBufs(g[0], 1, ps)
   let sb = createShiftBufs(g[0], -1, ps)
-  c.gaugeDeriv2SubsetWork(g, f, sd, sf, sb, parity, dir, true)
+  c.gaugeDeriv2SubsetWork(g, f, sd, sf, sb, parity, dir, true, work=work)
 
-proc gaugeDerivDeriv2*(c: GaugeActionCoeffs, g,h,f: array|seq) =
+proc gaugeDerivDeriv2*[V:static[int],T](c: GaugeActionCoeffs, g: openArray[Field[V,T]], h, f: array|seq; work: LoopWork[V,T] = nil) =
+  ## f += H_g(h), under the ambient real Frobenius pairing.
+  requireFundamental(c, "gaugeDerivDeriv2")
   mixin adj
   tic("gaugeDeriv2")
   let lo = g[0].l
   let nd = lo.nDim
   const nc = g[0][0].nrows
   let cp = - c.plaq / float(nc)
-  let cr = - c.rect / float(nc)
-  let t = newTransporters(g, g[0], 1)
-  let td = newTransporters(g, g[0], -1)
-  let th = newTransporters(h, g[0], 1)
-  let thd = newTransporters(h, g[0], -1)
+  var t, td: typeof(newTransporters(g, g[0], 1))
+  var th, thd: typeof(newTransporters(h, g[0], 1))
+  defer:
+    if work != nil: work.clearInputs
+  when typeof(g[0]) is typeof(h[0]):
+    if work != nil:
+      (t, td, th, thd) = work.hessianTrans(g, h)
+  if t.len == 0:
+    t = newTransporters(g, g[0], 1)
+    td = newTransporters(g, g[0], -1)
+    th = newTransporters(h, g[0], 1)
+    thd = newTransporters(h, g[0], -1)
   toc("gaugeForce2 setup")
+  let u = cast[ptr cArray[Field[V,T]]](unsafeAddr(g[0]))
   threads:
     for mu in 0..<nd:
       for nu in 0..<nd:
         if nu==mu: continue
-        discard t[nu] ^* g[mu]
+        discard t[nu] ^* u[mu]
         shiftExpr(t[mu].sb, f[mu][ir] += cp * t[nu].field[ir]*adj(it), h[nu][ix])
         discard t[nu] ^* h[mu]
-        shiftExpr(t[mu].sb, f[mu][ir] += cp * t[nu].field[ir]*adj(it), g[nu][ix])
-        discard th[nu] ^* g[mu]
-        shiftExpr(t[mu].sb, f[mu][ir] += cp * th[nu].field[ir]*adj(it), g[nu][ix])
+        shiftExpr(t[mu].sb, f[mu][ir] += cp * t[nu].field[ir]*adj(it), u[nu][ix])
+        discard th[nu] ^* u[mu]
+        shiftExpr(t[mu].sb, f[mu][ir] += cp * th[nu].field[ir]*adj(it), u[nu][ix])
         f[mu] += cp * td[nu] ^* t[mu] ^* h[nu]
-        f[mu] += cp * td[nu] ^* th[mu] ^* g[nu]
-        f[mu] += cp * thd[nu] ^* t[mu] ^* g[nu]
+        f[mu] += cp * td[nu] ^* th[mu] ^* u[nu]
+        f[mu] += cp * thd[nu] ^* t[mu] ^* u[nu]
+  if c.rect != 0 or c.pgm != 0:
+    gaugeLoopDeriv(GaugeActionCoeffs(rect: -c.rect, pgm: -c.pgm), g, h, f, true, work)
   toc("end")
 
-proc gaugeDerivDeriv2SubsetImpl(c: GaugeActionCoeffs, g: array|seq, hs, hdir: auto, f: array|seq, parity, dir: int, sum, add, addBase: static bool) =
+proc gaugeDerivDeriv2SubsetImpl[V:static[int],T](c: GaugeActionCoeffs, g: openArray[Field[V,T]], hs, hdir: auto, f: array|seq, parity, dir: int, sum, add, addBase: static bool; work: LoopWork[V,T] = nil) =
   # S=(parity,dir); sum: hdir|P=sum(hs)|P; add: f+=H(hdir|P).
   # addBase: f[S]+=H(hdir|P); f[~S]=base[~S]+H(hdir|P).
-  if c.rect != 0 or c.pgm != 0 or c.adjplaq != 0:
-    raise newException(ValueError, "gaugeDerivDeriv2Subset supports plaquette coefficients only")
+  requireFundamental(c, "gaugeDerivDeriv2Subset")
+  if c.rect != 0 or c.pgm != 0:
+    # Apply the full Hessian to a masked seed kept in workspace scratch.
+    let
+      w = useLoopWork(g, work)
+      hm = w.loopScratch
+      sub = g[0].l.getSubset(if parity == 0: "even" else: "odd")
+    when addBase:
+      let other = g[0].l.getSubset(if parity == 0: "odd" else: "even")
+    threads:
+      for mu in 0..<hm.len:
+        hm[mu] := 0
+      threadBarrier()
+      for x in sub:
+        when sum:
+          hdir[x] := hs[0][x]
+          for k in 1..<hs.len:
+            hdir[x] += hs[k][x]
+        hm[dir][x] := hdir[x]
+      threadBarrier()
+      when addBase:
+        for mu in 0..<f.len:
+          if mu != dir:
+            f[mu] := hs[mu]
+        for x in other:
+          f[dir][x] := hs[dir][x]
+      elif not add:
+        for mu in 0..<f.len:
+          f[mu] := 0
+    c.gaugeDerivDeriv2(g, hm, f, work=w)
+    return
   mixin adj
   tic("gaugeDerivDeriv2Subset")
   let lo = g[0].l
@@ -549,6 +1042,7 @@ proc gaugeDerivDeriv2SubsetImpl(c: GaugeActionCoeffs, g: array|seq, hs, hdir: au
   let bqSame = createShiftB(g[0], dir, -1, ps)
   let bqOther = createShiftB(g[0], dir, -1, po)
   toc("gaugeDerivDeriv2Subset setup")
+  let u = cast[ptr cArray[Field[V,T]]](unsafeAddr(g[0]))
   threads:
     when sum:
       for x in sub:
@@ -567,7 +1061,7 @@ proc gaugeDerivDeriv2SubsetImpl(c: GaugeActionCoeffs, g: array|seq, hs, hdir: au
     for nu in 0..<nd:
       if nu == dir: continue
 
-      discard sd ^*! g[nu]
+      discard sd ^*! u[nu]
       threadBarrier()
       template put(i, y: untyped) =
         when addBase:
@@ -577,18 +1071,18 @@ proc gaugeDerivDeriv2SubsetImpl(c: GaugeActionCoeffs, g: array|seq, hs, hdir: au
         else:
           f[nu][i] := y
       template setOtherAdd(i, t: untyped) =
-        put(i, cp * (g[dir][i] * sd.field[i]) * adj(t))
-        sq[i] := g[nu][i] * t
+        put(i, cp * (u[dir][i] * sd.field[i]) * adj(t))
+        sq[i] := u[nu][i] * t
         f[dir][i] += cp * sq[i] * adj(sd.field[i])
       when addBase:
         template setOtherBase(i, t: untyped) =
-          put(i, cp * (g[dir][i] * sd.field[i]) * adj(t))
-          sq[i] := g[nu][i] * t
+          put(i, cp * (u[dir][i] * sd.field[i]) * adj(t))
+          sq[i] := u[nu][i] * t
           f[dir][i] := hs[dir][i] + cp * sq[i] * adj(sd.field[i])
       template setSame(i, t: untyped) =
         sd.field[i] := hdir[i] * sd.field[i]
         put(i, cp * sd.field[i] * adj(t))
-        sq[i] := g[nu][i] * t
+        sq[i] := u[nu][i] * t
       when addBase:
         if nu == firstNu:
           shiftExpr(sfOther[nu], setOtherBase(ir, it), hdir[ix])
@@ -596,35 +1090,39 @@ proc gaugeDerivDeriv2SubsetImpl(c: GaugeActionCoeffs, g: array|seq, hs, hdir: au
           shiftExpr(sfOther[nu], setOtherAdd(ir, it), hdir[ix])
       else:
         shiftExpr(sfOther[nu], setOtherAdd(ir, it), hdir[ix])
-      shiftExpr(sfSame[nu], setSame(ir, it), g[dir][ix])
+      shiftExpr(sfSame[nu], setSame(ir, it), u[dir][ix])
       threadBarrier()
       toc("gaugeDerivDeriv2Subset forward")
 
-      shiftExpr(bqSame, f[nu][ir] += cp*it, g[dir][ix].adj * sq[ix])
+      shiftExpr(bqSame, f[nu][ir] += cp*it, u[dir][ix].adj * sq[ix])
       shiftExpr(bqOther, f[nu][ir] += cp*it, hdir[ix].adj * sq[ix])
-      shiftExpr(sb[nu], f[dir][ir] += cp*it, g[nu][ix].adj * sd.field[ix])
+      shiftExpr(sb[nu], f[dir][ir] += cp*it, u[nu][ix].adj * sd.field[ix])
       threadBarrier()
       toc("gaugeDerivDeriv2Subset backward")
   toc("gaugeDerivDeriv2Subset end")
 
-proc gaugeDerivDeriv2Subset*(c: GaugeActionCoeffs, g,h,f: array|seq, parity, dir: int) =
-  ## f = H_g(h[dir]|P). Plaquette-only.
-  c.gaugeDerivDeriv2SubsetImpl(g, h, h[dir], f, parity, dir, false, false, false)
+proc gaugeDerivDeriv2Subset*[V:static[int],T](c: GaugeActionCoeffs, g: openArray[Field[V,T]], h, f: array|seq, parity, dir: int; work: LoopWork[V,T] = nil) =
+  ## f = H_g(h[dir]|P), including all affected links.
+  c.gaugeDerivDeriv2SubsetImpl(g, h, h[dir], f, parity, dir, false, false, false, work=work)
 
-proc gaugeDerivDeriv2SubsetAdd*(c: GaugeActionCoeffs, g: array|seq, hdir: auto, f: array|seq, parity, dir: int) =
-  ## f += H_g(hdir|P). Plaquette-only.
-  c.gaugeDerivDeriv2SubsetImpl(g, hdir, hdir, f, parity, dir, false, true, false)
+proc gaugeDerivDeriv2SubsetAdd*[V:static[int],T](c: GaugeActionCoeffs, g: openArray[Field[V,T]], hdir: auto, f: array|seq, parity, dir: int; work: LoopWork[V,T] = nil) =
+  ## f += H_g(hdir|P).
+  c.gaugeDerivDeriv2SubsetImpl(g, hdir, hdir, f, parity, dir, false, true, false, work=work)
 
-proc gaugeDerivDeriv2SubsetAddBase*(c: GaugeActionCoeffs, g: array|seq, hdir: auto, base, f: array|seq, parity, dir: int) =
+proc gaugeDerivDeriv2SubsetAddBase*[V:static[int],T](c: GaugeActionCoeffs, g: openArray[Field[V,T]], hdir: auto, base, f: array|seq, parity, dir: int; work: LoopWork[V,T] = nil) =
   ## S=(P,dir): f[S] += H_g(hdir|P)[S].
-  ## f[~S] = base[~S] + H_g(hdir|P)[~S]. Plaquette-only.
-  c.gaugeDerivDeriv2SubsetImpl(g, base, hdir, f, parity, dir, false, false, true)
+  ## f[~S] = base[~S] + H_g(hdir|P)[~S].
+  c.gaugeDerivDeriv2SubsetImpl(g, base, hdir, f, parity, dir, false, false, true, work=work)
 
-proc gaugeDerivDeriv2SubsetSum*(c: GaugeActionCoeffs, g,h: array|seq, w: auto, f: array|seq, parity, dir: int) =
-  ## w|P = sum(h)|P; f = H_g(w|P). Plaquette-only.
-  c.gaugeDerivDeriv2SubsetImpl(g, h, w, f, parity, dir, true, false, false)
+proc gaugeDerivDeriv2SubsetSum*[V:static[int],T](c: GaugeActionCoeffs, g: openArray[Field[V,T]], h: array|seq, w: auto, f: array|seq, parity, dir: int; work: LoopWork[V,T] = nil) =
+  ## w|P = sum(h)|P; f = H_g(w|P).
+  c.gaugeDerivDeriv2SubsetImpl(g, h, w, f, parity, dir, true, false, false, work=work)
 
-proc gaugeForce2*(c: GaugeActionCoeffs, g,f: array|seq) =
+proc gaugeForce2*[V:static[int],T](c: GaugeActionCoeffs, g: openArray[Field[V,T]], f: array|seq; work: LoopWork[V,T] = nil) =
+  requireFundamental(c, "gaugeForce2")
+  if c.pgm != 0:
+    c.gaugeForce(g, f, work=work)
+    return
   mixin adj,projectTAH
   tic("gaugeForce2")
   let lo = g[0].l
@@ -638,40 +1136,40 @@ proc gaugeForce2*(c: GaugeActionCoeffs, g,f: array|seq) =
   let td = newTransporters(g, g[0], -1)
   let td2 = newTransporters(g, g[0], -1)
   toc("gaugeForce2 setup")
+  let u = cast[ptr cArray[Field[V,T]]](unsafeAddr(g[0]))
   threads:
     for mu in 0..<nd:
       #let mu = (mux + 1) mod nd
       f[mu] := 0
       for nu in 0..<nd:
         if nu==mu: continue
-        discard t[nu] ^* g[mu]
-        shiftExpr(t[mu].sb, f[mu][ir] += cp * t[nu].field[ir]*adj(it), g[nu][ix])
-        f[mu] += cp * td[nu] ^* t[mu] ^* g[nu]
+        discard t[nu] ^* u[mu]
+        shiftExpr(t[mu].sb, f[mu][ir] += cp * t[nu].field[ir]*adj(it), u[nu][ix])
+        f[mu] += cp * td[nu] ^* t[mu] ^* u[nu]
         if cr != 0:
-          discard t2[nu] ^* t[nu] ^* g[mu]
-          discard tg[nu] ^* g[nu]
+          discard t2[nu] ^* t[nu] ^* u[mu]
+          discard tg[nu] ^* u[nu]
           shiftExpr(t[mu].sb, f[mu][ir] += cr * t2[nu].field[ir]*adj(it), tg[nu].field[ix])
-          f[mu] += cr * td2[nu] ^* td[nu] ^* tg[mu] ^* t[nu] ^* g[nu]
-          f[mu] += cr * td2[mu] ^* td[nu] ^* tg[mu] ^* t[mu] ^* g[nu]
-          discard td[nu] ^* tg[mu] ^* t[mu] ^* g[nu]
-          shiftExpr(t2[mu].sb, f[mu][ir] += cr * td[nu].field[ir]*adj(it), g[mu][ix])
-          discard td[mu] ^* t[nu] ^* tg[mu] ^* g[mu]
-          shiftExpr(t2[mu].sb, f[mu][ir] += cr * td[mu].field[ir]*adj(it), g[nu][ix])
+          f[mu] += cr * td2[nu] ^* td[nu] ^* tg[mu] ^* t[nu] ^* u[nu]
+          f[mu] += cr * td2[mu] ^* td[nu] ^* tg[mu] ^* t[mu] ^* u[nu]
+          discard td[nu] ^* tg[mu] ^* t[mu] ^* u[nu]
+          shiftExpr(t2[mu].sb, f[mu][ir] += cr * td[nu].field[ir]*adj(it), u[mu][ix])
+          discard td[mu] ^* t[nu] ^* tg[mu] ^* u[mu]
+          shiftExpr(t2[mu].sb, f[mu][ir] += cr * td[mu].field[ir]*adj(it), u[nu][ix])
           threadBarrier()
           shiftExpr(t2[mu].sb, f[mu][ir] += cr * t[nu].field[ir]*adj(it), t[mu].field[ix])
-    for mu in 0..<nd:
-      for e in f[mu]:
-        let s = g[mu][e] * f[mu][e].adj
-        f[mu][e].projectTAH s
+    for mu in 0..<nd: contractProjectTAH(f[mu], u[mu], f[mu])
   toc("end")
 proc gaugeForce2*(f,g: array|seq) =
   var c = GaugeActionCoeffs(plaq:1.0)
   gaugeForce2(c,g,f)
 
-proc gaugeAction3*(c: GaugeActionCoeffs, g: array|seq): auto =
+proc gaugeAction3*[V:static[int],T](c: GaugeActionCoeffs, g: openArray[Field[V,T]]; work: LoopWork[V,T] = nil): auto =
+  requireFundamental(c, "gaugeAction3")
   tic("gaugeAction3")
   const nc = g[0][0].nrows
   let lo = g[0].l
+  let gs = @g  # wilsonLines captures its links in closures
   var pl = 0.0
   var rt = 0.0
   for mu in 1..<lo.nDim:
@@ -685,7 +1183,7 @@ proc gaugeAction3*(c: GaugeActionCoeffs, g: array|seq): auto =
           ls.add @[mu, nu, -mu, -nu]
         if c.rect!=0:
           ls.add [@[mu, nu, nu, -mu, -nu, -nu], @[mu, mu, nu, -mu, -mu, -nu]]
-      let ws = g.wilsonLines ls
+      let ws = gs.wilsonLines ls
       var i = 0
       if c.plaq!=0:
         pl += ws[0].re
@@ -693,6 +1191,8 @@ proc gaugeAction3*(c: GaugeActionCoeffs, g: array|seq): auto =
       if c.rect!=0:
         rt += ws[i].re + ws[i+1].re
   result = (-lo.physVol.float) * (c.plaq*pl + c.rect*rt)
+  if c.pgm != 0:
+    result += pgmAction(c, g, work)
   toc("end")
 proc gaugeAction3*(g: array|seq): auto =
   var c = GaugeActionCoeffs(plaq:1.0)
@@ -726,19 +1226,24 @@ proc plaqRectPath(c:GaugeActionCoeffs, mu,nu:int):auto =
   memoize(j,mu,nu):
     c.plaqRectPath_fun(mu,nu)
 
-proc gaugeForce3*(c: GaugeActionCoeffs, g,f: auto) =
+proc gaugeForce3*[V:static[int],T](c: GaugeActionCoeffs, g: openArray[Field[V,T]], f: auto; work: LoopWork[V,T] = nil) =
+  requireFundamental(c, "gaugeForce3")
+  if c.pgm != 0:
+    c.gaugeForce(g, f, work=work)
+    return
   tic("gaugeForce3")
   const nc = g[0][0].nrows
   let nd = g[0].l.nDim
   let cp = c.plaq / nc.float
   let cr = c.rect / nc.float
+  let gs = @g  # gaugeProd captures its links in closures
   threads:
     for mu in 0..<nd:
       f[mu] := 0
   for mu in 1..<nd:
     for nu in 0..<mu:
       let ptree = c.plaqRectPath(mu,nu)
-      let ws = g.gaugeProd ptree
+      let ws = gs.gaugeProd ptree
       threads:
         for ir in f[mu]:
           var pmu,rmu,pnu,rnu: type(load1(f[0][0]))
@@ -757,10 +1262,7 @@ proc gaugeForce3*(c: GaugeActionCoeffs, g,f: auto) =
             f[mu][ir] += cr * rmu
             f[nu][ir] += cr * rnu
   threads:
-    for mu in 0..<nd:
-      for e in f[mu]:
-        let s = g[mu][e] * f[mu][e].adj
-        f[mu][e].projectTAH s
+    for mu in 0..<nd: contractProjectTAH(f[mu], gs[mu], f[mu])
   toc("end")
 proc gaugeForce3*(f,g: array|seq) =
   var c = GaugeActionCoeffs(plaq:1.0)
@@ -768,6 +1270,7 @@ proc gaugeForce3*(f,g: array|seq) =
 
 proc actionA*(c: GaugeActionCoeffs, g: auto): auto =
   ## Specialized gauge action for plaq + adjplaq
+  requireAdjoint(c, "actionA")
   mixin mul, load1, createShiftBufs, re
   tic("actionA")
   let lo = g[0].l
@@ -836,6 +1339,7 @@ proc actionA*(c: GaugeActionCoeffs, g: auto): auto =
   toc("plaq end", flops=lo.nSites.float*float(2*8*nc*nc*nc-1))
 
 proc gaugeADeriv*(c: GaugeActionCoeffs, g,f: auto, accumulate=false) =
+  requireAdjoint(c, "gaugeADeriv")
   ## Specialized gauge force for plaq + adjplaq
   ## if accumulate, the derivatives will add to f.
   ## if not, f is set to 0 first.
@@ -901,6 +1405,16 @@ proc forceA*(c: GaugeActionCoeffs, g,f: auto) =
   contractProjectTAH(g, f)
   #contractProjectTAH(f, g)
   toc("forceA end")
+
+proc action*[V:static[int],T](c: GaugeActionCoeffs, g: openArray[Field[V,T]]; work: LoopWork[V,T] = nil): float =
+  ## Dispatch by coefficient family; mixed adjoint/improved terms are rejected.
+  if c.adjplaq != 0: c.actionA(@g)  # actionA captures its links in threads
+  else: c.gaugeAction1(g, work=work)
+
+proc force*[V:static[int],T](c: GaugeActionCoeffs, g: openArray[Field[V,T]], f: auto; work: LoopWork[V,T] = nil) =
+  ## Projected force for action(c,g). Keep f disjoint from g.
+  if c.adjplaq != 0: c.forceA(@g, f)  # forceA captures its links in threads
+  else: c.gaugeForce(g, f, work=work)
 
 when isMainModule:
   import qex
@@ -985,12 +1499,7 @@ when isMainModule:
   testR(g)
 
   proc updateX(g,p,eps:auto) =
-    mixin exp
-    for mu in 0..<g.len:
-      for e in g[mu]:
-        let t = exp(eps*p[mu][e])*g[mu][e]
-        g[mu][e] := t
-      #echo "g[", mu, "]: ", g[mu].norm2
+    axexpmuly(g, eps, p, g)
 
   proc updateP(c:GaugeActionCoeffs, g,p,eps:auto) =
     var f = newOneOf g

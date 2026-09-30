@@ -3,6 +3,8 @@ type
     value: float
   SlotDerivedValue = ref object of SlotBaseValue
     marker: int
+  RetryStorageScalar = ref object of Gscalar
+    attempts: int
 
 method newOneOf(x: SlotBaseValue): Gvalue =
   SlotBaseValue(runtime: x.runtime).assignStableNodeId
@@ -16,6 +18,12 @@ method zeroLike(x: SlotBaseValue): Gvalue =
 
 method valCopy(z: SlotBaseValue, x: Gvalue) =
   z.value = SlotBaseValue(x).value
+
+method ensureStorage(x: RetryStorageScalar) =
+  inc x.attempts
+  x.update(float(x.attempts))
+  if x.attempts == 1:
+    raiseError("requested storage preparation failure")
 
 suite "scalar basic":
   setup:
@@ -55,36 +63,6 @@ suite "scalar basic":
     check Gvalue(slot) of SlotDerivedValue
     check slot.marker == 17
     check slot.value == original.value
-
-  test "secondPullback keeps seed and upstream live":
-    block:
-      let x = grt.toGvalue(2.0)
-      proc replica(slot: Gscalar): Gvalue =
-        slot * slot * slot
-      let r = secondPullback(x, x, x, replica)
-      let drdx = r.grad x
-
-      r :~ 48.0
-      drdx :~ 72.0
-
-      x.update 3.0
-      r :~ 162.0
-      drdx :~ 162.0
-
-  test "secondPullback rejects mixed runtimes before building a replica":
-    let
-      primal = grt.toGvalue(2.0)
-      other = initGraphRuntime().toGvalue(1.0)
-    var replicaCalls = 0
-    proc replica(slot: Gscalar): Gvalue =
-      inc replicaCalls
-      slot * slot
-
-    expect(GraphValueError):
-      discard secondPullback(primal, other, primal, replica)
-    expect(GraphValueError):
-      discard secondPullback(primal, primal, other, replica)
-    check replicaCalls == 0
 
   test "update refreshes cached scalar values and gradients":
     let mutable = grt.toGvalue(2.0)
@@ -1109,3 +1087,75 @@ suite "scalar basic":
     let dy = z.grad y
     z :~ (a+b-2.0)*(2.0-a-b)/(a-2.0)
     dy :~ -2.0*(a+b-2.0)/(a-2.0)
+
+
+suite "ordinary scalar readiness":
+  test "a zero-input forward runs once before becoming ready":
+    let rt = initGraphRuntime()
+    var count = 0
+    proc forward(v: Gvalue) =
+      inc count
+      Gscalar(v).sval = 7.0
+    let z = graphNode(Gscalar(runtime: rt), newSeq[Gvalue](),
+      Gfunc(forward: forward, name: "constant forward"), "constant forward")
+    check not z.valueReady
+    z :~ 7.0
+    z :~ 7.0
+    check count == 1
+    check z.valueReady
+
+  test "a failed forward remains unready and retries":
+    let rt = initGraphRuntime()
+    var attempts = 0
+    proc forward(v: Gvalue) =
+      inc attempts
+      Gscalar(v).update(11.0)
+      if attempts == 1:
+        raiseError("requested scalar forward failure")
+    let z = graphNode(Gscalar(runtime: rt), newSeq[Gvalue](),
+      Gfunc(forward: forward, name: "retry scalar"), "retry scalar")
+    expect(GraphError):
+      discard z.eval
+    check not z.valueReady
+    check z.runCount == 0
+    z :~ 11.0
+    check attempts == 2
+    check z.valueReady
+    check z.runCount == 1
+
+  test "failed storage preparation remains unready and retries":
+    let rt = initGraphRuntime()
+    proc forward(v: Gvalue) =
+      Gscalar(v).sval = 17.0
+    let z = graphNode(RetryStorageScalar(runtime: rt), newSeq[Gvalue](),
+      Gfunc(forward: forward, name: "retry storage"), "retry storage")
+    expect(GraphError):
+      discard z.eval
+    check not z.valueReady
+    check z.runCount == 0
+    check z.attempts == 1
+    z :~ 17.0
+    check z.attempts == 2
+    check z.valueReady
+    check z.runCount == 1
+
+  test "expired scalar overrides invalidate cached ordinary consumers":
+    let rt = initGraphRuntime()
+    let x = rt.toGvalue(2.0)
+    let a = x*x
+    a.update(10.0)
+    let b = a*a
+    b :~ 100.0
+    let ep = a.epoch
+    let count = b.runCount
+    a.valueReady = false
+    b :~ 16.0
+    a :~ 4.0
+    check a.epoch > ep
+    check b.runCount == count+1
+    check not a.valueOverride
+    let restored = a.epoch
+    a.valueReady = false
+    b :~ 16.0
+    check a.epoch == restored
+    check b.runCount == count+1

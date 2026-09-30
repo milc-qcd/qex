@@ -1,6 +1,7 @@
 import ../[core, scalar]
 import ../support/op
 import layout, gauge, physics/qcdTypes
+import field/matrixFields
 import types
 
 # Site-local algebra, stamped once for the gauge bundle and once for the
@@ -230,18 +231,18 @@ template stampSiteOps(T: typedesc, tag: static string) =
   proc `-`*[L: Literal](x: T, y: L): T =
     x - toGvalue(x.runtime, float(y))
 
-  let retrg = Gfunc(forward: retrf[T], backward: retrb[T], name: "retr" & tag)
-  let adjg = Gfunc(forward: adjf[T], backward: adjb[T], name: "adj" & tag)
-  let norm2g = Gfunc(forward: norm2f[T], backward: norm2b[T], name: "norm2" & tag)
-  let negg = Gfunc(forward: negf[T], backward: negb[T], name: "-" & tag)
-  let addsg = Gfunc(forward: addsf[T], backward: addsb[T], name: "s+" & tag)
-  let addg = Gfunc(forward: addf[T], backward: addb[T], name: tag & "+" & tag)
-  let mulsg = Gfunc(forward: mulsf[T], backward: mulsb[T], name: "s*" & tag)
-  let mulg = Gfunc(forward: mulf[T], backward: mulb[T], name: tag & "*" & tag)
-  let redotg = Gfunc(forward: redotf[T], backward: redotb[T], name: "redot" & tag)
-  let subsg = Gfunc(forward: subsf[T], backward: subsb[T], name: tag & "-s")
-  let subg = Gfunc(forward: subf[T], backward: subb[T], name: tag & "-" & tag)
-  let projTAHg = Gfunc(forward: projTAHf[T], backward: projTAHb[T], name: "projTAH" & tag)
+  let retrg = Gfunc(bufferMode: bmFull, forward: retrf[T], backward: retrb[T], name: "retr" & tag)
+  let adjg = Gfunc(bufferMode: bmFull, forward: adjf[T], backward: adjb[T], name: "adj" & tag)
+  let norm2g = Gfunc(bufferMode: bmFull, forward: norm2f[T], backward: norm2b[T], name: "norm2" & tag)
+  let negg = Gfunc(bufferMode: bmFull, inplace: @[0], forward: negf[T], backward: negb[T], name: "-" & tag)
+  let addsg = Gfunc(bufferMode: bmFull, inplace: @[1], forward: addsf[T], backward: addsb[T], name: "s+" & tag)
+  let addg = Gfunc(bufferMode: bmFull, inplace: @[0, 1], forward: addf[T], backward: addb[T], name: tag & "+" & tag)
+  let mulsg = Gfunc(bufferMode: bmFull, inplace: @[1], forward: mulsf[T], backward: mulsb[T], name: "s*" & tag)
+  let mulg = Gfunc(bufferMode: bmFull, forward: mulf[T], backward: mulb[T], name: tag & "*" & tag)
+  let redotg = Gfunc(bufferMode: bmFull, forward: redotf[T], backward: redotb[T], name: "redot" & tag)
+  let subsg = Gfunc(bufferMode: bmFull, forward: subsf[T], backward: subsb[T], name: tag & "-s")
+  let subg = Gfunc(bufferMode: bmFull, forward: subf[T], backward: subb[T], name: tag & "-" & tag)
+  let projTAHg = Gfunc(bufferMode: bmFull, forward: projTAHf[T], backward: projTAHb[T], name: "projTAH" & tag)
 
   proc retr*(x: T): Gscalar =
     graphNode(scalarNodeLike(x), @[Gvalue(x)], retrg, "retr" & tag)
@@ -313,6 +314,98 @@ stampSiteOps(Gfield, "f")
 when not cfieldIsGfield:
   stampSiteOps(Gcfield, "c")
 
+proc retr*[n:static[int]](x: Grmat[n]): Gscalar
+proc adj*[n:static[int]](x: Grmat[n]): Grmat[n]
+proc norm2*[n:static[int]](x: Grmat[n]): Gscalar
+proc redot*[n:static[int]](x, y: Grmat[n]): Gscalar
+proc `-`*[n:static[int]](x: Grmat[n]): Grmat[n]
+proc `+`*[n:static[int]](x: Gscalar, y: Grmat[n]): Grmat[n]
+proc `+`*[n:static[int]](x, y: Grmat[n]): Grmat[n]
+proc `*`*[n:static[int]](x: Gscalar, y: Grmat[n]): Grmat[n]
+proc `*`*[n:static[int]](x, y: Grmat[n]): Grmat[n]
+proc `-`*[n:static[int]](x: Grmat[n], y: Gscalar): Grmat[n]
+proc `-`*[n:static[int]](x, y: Grmat[n]): Grmat[n]
+
+proc `+`*[n:static[int],L:Literal](x: L, y: Grmat[n]): Grmat[n] =
+  toGvalue(y.runtime, float(x)) + y
+proc `*`*[n:static[int],L:Literal](x: L, y: Grmat[n]): Grmat[n] =
+  toGvalue(y.runtime, float(x)) * y
+proc `-`*[n:static[int],L:Literal](x: Grmat[n], y: L): Grmat[n] =
+  x - toGvalue(x.runtime, float(y))
+proc `+`*[n:static[int],L:Literal](x: Grmat[n], y: L): Grmat[n] = y + x
+proc `*`*[n:static[int],L:Literal](x: Grmat[n], y: L): Grmat[n] = y * x
+proc `+`*[n:static[int]](x: Grmat[n], y: Gscalar): Grmat[n] = y + x
+proc `*`*[n:static[int]](x: Grmat[n], y: Gscalar): Grmat[n] = y * x
+proc `-`*[n:static[int]](x: Gscalar, y: Grmat[n]): Grmat[n] = x + (-y)
+proc `-`*[n:static[int],L:Literal](x: L, y: Grmat[n]): Grmat[n] =
+  toGvalue(y.runtime, float(x)) - y
+
+proc retr*[n:static[int]](x: Grmat[n]): Gscalar =
+  let op {.global.} = Gfunc(bufferMode: bmFull, forward: retrf[Grmat[n]], backward: retrb[Grmat[n]], name: "retrRmat")
+  graphNode(scalarNodeLike(x), @[Gvalue(x)], op, "retrRmat")
+
+proc adj*[n:static[int]](x: Grmat[n]): Grmat[n] =
+  let op {.global.} = Gfunc(bufferMode: bmFull, forward: adjf[Grmat[n]], backward: adjb[Grmat[n]], name: "transposeRmat")
+  graphNode(x.fieldNodeLike, @[Gvalue(x)], op, "transposeRmat")
+
+proc transpose*[n:static[int]](x: Grmat[n]): Grmat[n] = x.adj
+
+proc norm2*[n:static[int]](x: Grmat[n]): Gscalar =
+  let op {.global.} = Gfunc(bufferMode: bmFull, forward: norm2f[Grmat[n]], backward: norm2b[Grmat[n]], name: "norm2Rmat")
+  graphNode(scalarNodeLike(x), @[Gvalue(x)], op, "norm2Rmat")
+
+proc redot*[n:static[int]](x, y: Grmat[n]): Gscalar =
+  x.requireSameFieldShape(y, "redotRmat")
+  let op {.global.} = Gfunc(bufferMode: bmFull, forward: redotf[Grmat[n]], backward: redotb[Grmat[n]], name: "redotRmat")
+  graphNode(scalarNodeLike(x), @[Gvalue(x), Gvalue(y)], op, "redotRmat")
+
+proc `-`*[n:static[int]](x: Grmat[n]): Grmat[n] =
+  let op {.global.} = Gfunc(bufferMode: bmFull, inplace: @[0], forward: negf[Grmat[n]], backward: negb[Grmat[n]], name: "negRmat")
+  graphNode(x.fieldNodeLike, @[Gvalue(x)], op, "negRmat")
+
+proc `+`*[n:static[int]](x: Gscalar, y: Grmat[n]): Grmat[n] =
+  let op {.global.} = Gfunc(bufferMode: bmFull, inplace: @[1], forward: addsf[Grmat[n]], backward: addsb[Grmat[n]], name: "s+Rmat")
+  graphNode(y.fieldNodeLike, @[Gvalue(x), Gvalue(y)], op, "s+Rmat")
+
+proc `+`*[n:static[int]](x, y: Grmat[n]): Grmat[n] =
+  x.requireSameFieldShape(y, "addRmat")
+  let op {.global.} = Gfunc(bufferMode: bmFull, inplace: @[0, 1], forward: addf[Grmat[n]], backward: addb[Grmat[n]], name: "addRmat")
+  # Flatten the left sum; addf accumulates its inputs and y in order.
+  var inputs = if x.gfunc == op: x.inputs else: @[Gvalue(x)]
+  inputs.add Gvalue(y)
+  graphNode(x.fieldNodeLike, inputs, op, "addRmat")
+
+proc `*`*[n:static[int]](x: Gscalar, y: Grmat[n]): Grmat[n] =
+  let op {.global.} = Gfunc(bufferMode: bmFull, inplace: @[1], forward: mulsf[Grmat[n]], backward: mulsb[Grmat[n]], name: "s*Rmat")
+  graphNode(y.fieldNodeLike, @[Gvalue(x), Gvalue(y)], op, "s*Rmat")
+
+proc `*`*[n:static[int]](x, y: Grmat[n]): Grmat[n] =
+  x.requireSameFieldShape(y, "mulRmat")
+  let op {.global.} = Gfunc(bufferMode: bmFull, forward: mulf[Grmat[n]], backward: mulb[Grmat[n]], name: "mulRmat")
+  graphNode(x.fieldNodeLike, @[Gvalue(x), Gvalue(y)], op, "mulRmat")
+
+proc `-`*[n:static[int]](x: Grmat[n], y: Gscalar): Grmat[n] =
+  let op {.global.} = Gfunc(bufferMode: bmFull, forward: subsf[Grmat[n]], backward: subsb[Grmat[n]], name: "Rmat-s")
+  graphNode(x.fieldNodeLike, @[Gvalue(x), Gvalue(y)], op, "Rmat-s")
+
+proc `-`*[n:static[int]](x, y: Grmat[n]): Grmat[n] =
+  x.requireSameFieldShape(y, "subRmat")
+  let op {.global.} = Gfunc(bufferMode: bmFull, forward: subf[Grmat[n]], backward: subb[Grmat[n]], name: "subRmat")
+  graphNode(x.fieldNodeLike, @[Gvalue(x), Gvalue(y)], op, "subRmat")
+
+template realMethods(T: typedesc) =
+  method addLike*(prototype: T, x, y: Gvalue): Gvalue = T(x) + T(y)
+
+  method scaleLike*(contribution: T, upstream: Gvalue): Gvalue =
+    if upstream of Gscalar:
+      return Gscalar(upstream) * contribution
+    if upstream of T:
+      return T(upstream) * contribution
+    raiseValueError("real matrix scale expects a scalar or same-type upstream")
+
+realMethods(Grfield)
+realMethods(Grmat8)
+
 proc blendSubset*(parity, dir: int, cand, x: Ggauge): Ggauge =
   ## Use `cand` on one parity/direction subset and `x` elsewhere.
   requireParityDir(parity, dir, x.gval.len, "blendSubset")
@@ -325,10 +418,8 @@ proc blendSubset*(parity, dir: int, cand, x: Ggauge): Ggauge =
       z = Ggauge(v)
     threads:
       for mu in 0..<z.gval.len:
-        z.gval[mu] := x.gval[mu]
-      threadBarrier()
-      for e in sub:
-        z.gval[dir][e] := cand.gval[dir][e]
+        if mu == dir: blendSubset(z.gval[mu], cand.gval[mu], x.gval[mu], sub)
+        else: z.gval[mu] := x.gval[mu]
 
   proc backward(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
     let
@@ -339,7 +430,7 @@ proc blendSubset*(parity, dir: int, cand, x: Ggauge): Ggauge =
     else:
       Gvalue(blendSubset(parity, dir, zero, up))
 
-  graphNode(sameShapeGaugeNodeLike(cand, x, "blendSubset"), @[Gvalue(cand), Gvalue(x)], Gfunc(forward: forward, backward: backward, name: "blendSubset"), "blendSubset")
+  graphNode(sameShapeGaugeNodeLike(cand, x, "blendSubset"), @[Gvalue(cand), Gvalue(x)], Gfunc(bufferMode: bmFull, forward: forward, backward: backward, name: "blendSubset"), "blendSubset")
 
 proc maskSubset*(parity, dir: int, x: Ggauge): Ggauge =
   ## x on the (parity, dir) subset, zero elsewhere.

@@ -1,6 +1,21 @@
 import math, unittest
 
+# Graph test drivers reserve command-line arguments for QEX and run every case.
+disableParamFiltering()
+
 import ../[core, scalar]
+
+# refc scans the live stack frames conservatively, dead locals included, so a
+# case body run inline keeps its graph alive through GC_fullCollect. Run each
+# case in its own frame and collect after it returns. Runtime caches also hold
+# the graph: reset them inside `body`.
+proc runCase(f: proc()) {.noinline.} = f()
+
+template gcTest*(name, body: untyped) =
+  runCase(proc() =
+    unittest.test name:
+      body)
+  GC_fullCollect()
 
 type
   SampleScalarValues* = tuple[a, b: float]
@@ -98,7 +113,7 @@ template `:~`*(a: Gvalue, b: Gvalue) =
 template `:<`*(a: Gvalue, b: float) =
   let evaluated: Gvalue = a.eval
   let av = abs(Gscalar(evaluated).sval)
-  if av >= b:
+  if not (av < b):
     let ii = instantiationInfo()
     let sa = astToStr a
     let sb = astToStr b

@@ -1,5 +1,3 @@
-#RUNCMD env OMP_NUM_THREADS=1 $RUN1
-
 import math, unittest
 
 addOutputFormatter(newConsoleOutputFormatter(colorOutput = false))
@@ -17,13 +15,14 @@ let grt = initGraphRuntime()
 include gauge/gaugehelpers
 
 # Path equivalences and higher derivatives build reference graphs behind the
-# fused kernels; keep the lattice small. Run this alongside tggauge and
+# fused kernels. Run this alongside tggauge and
 # tgtoweru1 (Nc=1) to cover both the path comparisons and derivative towers.
-# Run with OMP_NUM_THREADS=1: the lattice is far too small for threading,
-# and per-kernel thread fork/join otherwise dominates the runtime (~1000x).
-proc runTowerTests*(lat: seq[int], seed: uint64, subDir: int,
+proc runTowerTests*(localLat: seq[int], seed: uint64, subDir: int,
                     smearSteps: int) =
   qexInit()
+  echo "tower ranks: ", nRanks
+  letParam:
+    lat = latticeFromLocalLattice(localLat,nRanks)
   let lo = lat.newLayout
   var
     r = lo.newRNGField(Philox4x64, seed)
@@ -53,4 +52,4 @@ proc runTowerTests*(lat: seq[int], seed: uint64, subDir: int,
 
 when isMainModule:
   # Smearing matches the tggauge fixtures, so both test the same kind of configuration.
-  runTowerTests(@[4,4,4,4], 987654321u64, 2, 5)
+  runTowerTests(@[4,4,8,8], 987654321u64, 2, 5)

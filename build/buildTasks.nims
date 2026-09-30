@@ -34,7 +34,7 @@ proc setUserNimFlags(x: seq[string]) =
 var nimFlags: seq[string] = @[]
 var nimCmdArgs = ""
 #var extraFlags = ""
-type Compiler = tuple[name: string, major: int]
+type Compiler = tuple[name: string, major: int, simd: string]
 
 proc compilerInfo(flags: seq[string]): Compiler =
   # The merged flags contain configuration settings followed by user overrides.
@@ -57,8 +57,13 @@ proc compilerInfo(flags: seq[string]): Compiler =
   let dir = cfg.getOrDefault(pre & ".path", cfg.getOrDefault("--" & typ & ".path"))
   let cmd = (if dir.len > 0: dir / exe else: exe).quoteShell
   let lang = if ccDef == "cpp": "c++" else: "c"
+  # simd = "auto" reads the target macros set by the active optimization options,
+  # e.g. through -march=native; other settings keep the probe free of user options.
+  let optKey = pre[2..^1] & ".options." & (if fo.debug: "debug" else: "speed")
+  let opts = if simd == "auto": cfg.getOrDefault("--" & optKey, get(optKey)) else: ""
   # Probe the compiler behind MPI wrappers after applying environment/flag overrides.
   # Other compilers also define __GNUC__; their own macros distinguish them from GCC.
+  # The simd line reports the intrinsics the target supports; the AVX512 code needs DQ.
   let src = """
 #if defined(__INTEL_COMPILER) || defined(__INTEL_LLVM_COMPILER) || defined(__NVCOMPILER) || defined(__PGI)
 #elif defined(__clang__)
@@ -66,32 +71,88 @@ qex_cc clang __clang_major__
 #elif defined(__GNUC__)
 qex_cc gcc __GNUC__
 #endif
+#if defined(__AVX512F__) && defined(__AVX512DQ__)
+qex_simd SSE,AVX,AVX512
+#elif defined(__AVX__)
+qex_simd SSE,AVX
+#endif
 """
-  let (outp, code) = gorgeEx(cmd & " -E -P -x " & lang & " -", src)
+  let (outp, code) = gorgeEx(cmd & " " & opts & " -E -P -x " & lang & " -", src)
   if code != 0:
     raise newException(IOError, "Compiler probe failed for " & exe & ":\n" & outp)
   for line in outp.splitLines:
     let s = line.splitWhitespace
     if s.len == 3 and s[0] == "qex_cc":
-      return (name: s[1], major: parseInt(s[2]))
+      result.name = s[1]
+      result.major = parseInt(s[2])
+    elif s.len == 2 and s[0] == "qex_simd":
+      result.simd = s[1]
 
 proc compilerFlags(c: Compiler): seq[string] =
   if c.name == "gcc" and c.major >= 15:
     # Under -Ofast, GCC can turn omp master assignments into stores by every thread.
     # Disable -fallow-store-data-races so workers cannot overwrite updates with stale values.
-    result.add "--passC:-fno-allow-store-data-races"
+    result.add "-fno-allow-store-data-races"
+  elif c.name == "clang" and c.major == 19:
+    # LLVM 19 SLP can insert poison lanes in matrix powers (LLVM #108421).
+    result.add "-fno-slp-vectorize"
 
+proc addCompilerFlags(flags: var seq[string], cflags: seq[string]) =
+  if cflags.len == 0: return
+  let extra = cflags.join(" ")
+  # Nim emits --passC before optimization options, which can override it.
+  var cfg = initTable[string, string]()
+  for arg in flags:
+    let s = arg.split(':', 1)
+    if s.len > 1:
+      var p = parseCmdLine(s[1])
+      # hack to fix parsing of some quotes:
+      while true:
+        var i = 0
+        while i < p.len and p[i] != "\'": inc i
+        var j = i+1
+        while j < p.len and p[j] != "\'": inc j
+        if j >= p.len: break
+        if i>0 and p[i-1][^1] == '=': dec i
+        for k in i+1 .. j:
+          p[i] &= p[k]
+        p.delete(i+1, j)
+      cfg[s[0].nimIdentNormalize] = p.join(" ")
+    else:
+      cfg[s[0].nimIdentNormalize] = ""
+  let typ = cfg.getOrDefault("--cc", ccType).nimIdentNormalize
+  let pre = typ & (if ccDef == "cpp": ".cpp" else: "") & ".options."
+  # Preserve Nim's GCC/Clang defaults for empty option groups.
+  for (opt, def) in [("debug", "-g"), ("speed", "-O3"), ("size", "-Os")]:
+    let key = pre & opt
+    var val = cfg.getOrDefault("--" & key, get(key))
+    if val.len == 0: val = def
+    flags.add "--" & key & ":" & (val & " " & extra).quoteShell
+  flags.add "--passC:" & extra.quoteShell
+
+proc simdFlags(c: Compiler): seq[string] =
+  for s in c.simd.split(','):
+    if s != "": result.add "--d:" & s
+
+var compiler: Compiler
 proc setNimFlags() =
   if nimFlags.len == 0:
     nimFlags = getNimFlags(fo)
+    compiler = compilerInfo(nimFlags & userNimFlags)
+    if simd == "auto":
+      # Auto defines precede user flags, so -u:AVX and friends still win.
+      echo "setting: simd <- \"", compiler.simd, "\" (auto)"
+      nimFlags.add simdFlags(compiler)
     nimFlags.add userNimFlags
-    nimFlags.add compilerFlags(compilerInfo(nimFlags))
+    nimFlags.addCompilerFlags(compilerFlags(compiler))
   nimCmdArgs = join(nimArgs," ") & " " & join(nimFlags," ")
   #if extraFlags != "":
   #  nimCmdArgs &= " " & extraFlags
 
 var run = false
 var runArgs = ""
+var jobs = 1
+var builds: seq[string]
 #var verbosity = -1
 var bindir = "bin"
 var srcPaths = @[".", "qex/src", "qex/tests"]  # use relative paths for convenience
@@ -111,14 +172,36 @@ proc findSrc(g: string): tuple[files:seq[string],dirs:seq[string]] =
     let d = staticExec &"cd {d}; find {p} -type d -ipath '*{g}' |sort"
     if d != "":
       ds.add d.splitLines
-  result = (files:fs, dirs:ds)
+  # Normalize overlapping matches to the same "./..." form before deduplicating.
+  result = (files: fs.mapIt("." / it.relativePath(d)).deduplicate,
+            dirs: ds.mapIt("." / it.relativePath(d)).deduplicate)
+
+proc runBuilds() =
+  if builds.len == 0: return
+  var cmd = "status=0\n"
+  for i, s in builds:
+    cmd &= "( " & s & " ) &\np" & $i & "=$!\n"
+  # Wait for every child, including when an earlier compilation fails.
+  for i, s in builds:
+    cmd &= "if wait \"$p" & $i & "\"; then :; else\n"
+    cmd &= "printf '%s\\n' " & ("failed: " & s).quoteShell & " >&2\nstatus=1\nfi\n"
+  cmd &= "exit \"$status\""
+  builds.setLen(0)
+  exec "sh -c " & cmd.quoteShell
 
 # return true if failed
 proc buildFile(f: string, outfile=""): bool =
   setNimFlags()
   var tool = ""
   #tool = "valgrind "
-  var nimcmd = tool & nim & " " & nimCmdArgs
+  var nimcmd = tool & nim.quoteShell & " " & nimCmdArgs
+  if jobs > 1 and not run:
+    var cache = nimcache
+    for arg in nimFlags:
+      let s = arg.split({':', '='}, 1)
+      if s.len == 2 and s[0].nimIdentNormalize == "--nimcache":
+        cache = parseCmdLine(s[1]).join("")
+    nimcmd &= " --nimcache:" & (cache / ("job-" & $builds.len)).quoteShell
   if run: nimcmd &= " -r "
   var (dir, name, ext) = splitFile(f)
   if outfile!="": name = outfile
@@ -128,13 +211,13 @@ proc buildFile(f: string, outfile=""): bool =
     name = bindir / name
   #let cc = if usecpp: "cpp" else: "c"
   let cc = ccDef
-  let s = nimcmd & " " & cc & " -o:" & name & " " & f & runArgs
+  let s = nimcmd & " " & cc & " -o:" & name.quoteShell & " " & f.quoteShell & runArgs
   echo "running: ", s
-  try:
+  if jobs > 1 and not run:
+    builds.add s
+    if builds.len == jobs: runBuilds()
+  else:
     exec s
-  except:
-    echo "failed: ", s
-    quit(-1)
   return false
 
 # return true if failed
@@ -184,6 +267,11 @@ configTask run, "run executable after building":
 
 configTask verb, "set build verbosity to N (verb:N), N in 0,1,2,3":
   buildVerbosity = getInt()
+
+configTask jobs, "compile in batches of N with separate caches (jobs:N, default 1)":
+  jobs = getInt()
+  if jobs < 1:
+    raise newException(ValueError, "jobs:N requires N >= 1")
 
 
 # === Build Tasks ===
@@ -299,6 +387,8 @@ buildTask clean, cleanDesc:
     #echo f
     #if f.endsWith(".o") or f.endsWith(".c") or f.endsWith(".cpp"):
     rmFile f
+  for d in nimcache.listDirs:
+    rmDir d
 
 #let extraTests = [
 #  "gauge/wflow.nim",
@@ -384,6 +474,7 @@ proc buildTests(scope = "") =
         mkDir outdir
       runscript.addTest(qexDir/"src"/f, outdir)
       extraArgs = ""
+  runBuilds()
   #echo runscript.join("\n")
   runscript.add("$CLEANUPJOBS")
   runscript.add("if [ X != \"X$failed\" ];then echo Failed tests: $failed;exit 1;fi")
@@ -409,6 +500,7 @@ proc runMake(args: seq[string]) =
     if failed:
       echo "Error: invalid source arg: ", a
       quit(1)
+  runBuilds()
 
 let makeDesc = """   Search for each [path]... as described below,
                compile, link, and put executables in `bin'"""
@@ -423,6 +515,7 @@ buildTask doc, "build inline docs":
   #nim doc --project --index:on --git.url:<url> --git.commit:<tag> --outdir:htmldocs <main_filename>.nim
   #runArgs = " --project --index:on --outdir:htmldocs "
   discard buildFile(file, "htmldocs")
+  runBuilds()
 
 buildTask nbook, "build nimibook docs":
   setNimFlags()

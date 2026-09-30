@@ -3,16 +3,38 @@
 ##   F_x = projectTAH(W_x ds_x†)
 ##   W'_x = exp(alpha F_x) W_x,  x in S;  W'_x = W_x otherwise
 ##   M_x = alpha W_x ds_x†
-##   log J_S = sum(x in S) expProjMulLogJac(M_x).
+##   log J_S = sum(x in S) expProjMulLogJac(M_x, scale=expProjectTAHScale).
 ##
 ## The subset Jacobian is link-local. U(1) and SU(3) dispatch by matrix size.
 
 import ../[core, scalar, multi]
 import ../support/op
 import layout, gauge, physics/qcdTypes
-import types, basic_ops, matfun
-from action/ops import Gactcoeff, gaugeActionDeriv
+import types, basic_ops, matfun, field_ops, matrix
+from action/ops import Gactcoeff, gaugeActionDeriv, gaugeActionDeriv2
 import maths/groupOps, maths/matrixFunctions
+import gauge/stoutsmear
+
+proc stoutCoeff(c, value: Gactcoeff): Gactcoeff
+
+proc stoutCoefff(v: Gvalue) =
+  let c = Gactcoeff(v.inputs[0]).cval
+  if c.rect != 0 or c.pgm != 0 or c.adjplaq != 0:
+    raiseValueError("stoutUpdateLogDetJ requires Wilson coefficients for independent parity/direction Jacobian blocks")
+  Gactcoeff(v).cval = GaugeActionCoeffs(plaq: Gactcoeff(v.inputs[1]).cval.plaq)
+
+proc stoutCoeffb(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
+  let c = Gactcoeff(z.inputs[0])
+  if i == 0:
+    return stoutCoeff(c, Gactcoeff(c.zeroLike))
+  stoutCoeff(c, requireUpstream(zb, "stout coefficients backward", Gactcoeff))
+
+let stoutCoeffg = Gfunc(bufferMode: bmFull, forward: stoutCoefff, backward: stoutCoeffb, name: "stoutCoeff")
+
+proc stoutCoeff(c, value: Gactcoeff): Gactcoeff =
+  # Rectangle and parallelogram staples couple active links, including a
+  # repeated physical link under extent-two periodic wrapping.
+  graphNode(Gactcoeff(runtime: c.runtime), @[Gvalue(c), Gvalue(value)], stoutCoeffg, "stoutCoeff")
 
 proc gaugeGradSlot(x: Gmulti, i: int): Ggauge =
   ## View slot i without copying; x remains an evaluation dependency.
@@ -28,12 +50,71 @@ proc gaugeGradSlot(x: Gmulti, i: int): Ggauge =
     for k in 0 ..< base.len:
       slots.add(if k == i: u else: base.storedSlot(k).zeroLike)
     multiValues("stoutGradView backward", slots)
-  graphNode(view, @[Gvalue(x)], Gfunc(forward: fwd, backward: bwd, name: "stoutGradView"), "stoutGradView")
+  graphNode(view, @[Gvalue(x)], Gfunc(bufferMode: bmAlias, aliasInputs: @[0], forward: fwd, backward: bwd, name: "stoutGradView"), "stoutGradView")
 
 proc stoutReplica(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): Ggauge =
   ## The subset update as basic ops: exp(alpha projTAH(W ds^dag)) W on
-  ## (parity, dir), W elsewhere.
+  ## (parity, dir), W elsewhere. Higher update pullbacks differentiate this
+  ## ordinary exponential replica, approximating the expAH/Phi fused kernels.
   blendSubset(parity, dir, exp(alpha * projTAH(W * ds.adj)) * W, W)
+
+proc stoutLogDetJGraph*(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): Gscalar =
+  ## Finite logdet replica: K = I + Phi(-ad(F))*D, F = projectTAH(M).
+  ## Phi starts with P13(X/32), then P <- P + 2^(j-6) X P^2, j=0..4.
+  ## Pullbacks differentiate this finite logdet; Phi approximates the Lie
+  ## differential used for the expAH update.
+  W.requireSameGaugeShape(ds, "stoutLogDetJGraph")
+  requireParityDir(parity, dir, W.gval.len, "stoutLogDetJGraph")
+  let m = maskSubset(parity, alpha * linkField(W, dir) * linkField(ds, dir).adj)
+  const nc = W.gval[0][0].nrows
+  when nc == 1:
+    sum(ln(1.0 + re(m)))
+  elif nc == 3:
+    let x = su3AdNeg(m)
+    let d = su3ProjectDeriv(m)
+    const h = 1.0 / float(1 shl expProjectTAHScale)
+    let y = h*x
+    var p = diffExpC[expProjectTAHOrder-1] + diffExpC[expProjectTAHOrder]*y
+    for k in countdown(expProjectTAHOrder-2, 0):
+      p = diffExpC[k] + y*p
+    var c = 0.5*h
+    for j in 0..<expProjectTAHScale:
+      let pp = p*p
+      p = p + c*(x*pp)
+      c *= 2.0
+    sumLogDet(1.0 + p*d)
+  else:
+    {.error: "stout logdet supports U1 and SU3".}
+
+proc replicaInputGrads(args: Gmulti, nlive: int,
+                       score: proc(slots: seq[Gvalue]): Gscalar): Gmulti =
+  ## Differentiate independent packed slots; trailing evaluation caches get zero.
+  var slots: seq[Gvalue]
+  for j in 0..<nlive:
+    slots.add slotVar(args[j])
+  let s = score(slots)
+  let one = toGvalue(args.runtime, 1.0)
+  var grads: seq[Gvalue]
+  for x in slots:
+    grads.add gradSeeded(s, x, one)
+  for j in nlive..<args.len:
+    grads.add args[j].zeroLike
+  multiValues("stout replica input gradients", grads)
+
+proc stoutScore(slots: seq[Gvalue], termIndex, nterms, logIndex: int,
+                hasLog: bool, parity, dir: int): Gscalar =
+  let
+    W = Ggauge(slots[0])
+    ds = Ggauge(slots[1])
+    a = Gscalar(slots[2])
+  result = toGvalue(a.runtime, 0.0)
+  if nterms > 0:
+    var u = Ggauge(slots[termIndex])
+    for j in 1..<nterms:
+      u = u + Ggauge(slots[termIndex+j])
+    result = redot(u, stoutReplica(W, ds, a, parity, dir))
+  if hasLog:
+    result = result + Gscalar(slots[logIndex]) * stoutLogDetJGraph(W, ds, a, parity, dir)
 
 proc replicaSlotGrads(args: Gmulti, nterms, ntail: int, parity, dir: int,
                       score: proc(R, sW, sds: Ggauge, sa: Gscalar, u: Ggauge): Gscalar): Gmulti =
@@ -79,13 +160,66 @@ proc requireLogdetAuxIndependent(wrt, auxiliary: Gvalue,
 type GstoutUpdate = ref object of Ggauge
   expa: DLatticeColorMatrixV
 
+method hasStorage(x: GstoutUpdate): bool =
+  (procCall Ggauge(x).hasStorage) and not x.expa.s.data.isNil
+
+method ensureStorage(x: GstoutUpdate) =
+  x.expa.ensureFieldStorage
+  procCall Ggauge(x).ensureStorage
+
+method releaseStorage(x: GstoutUpdate) =
+  x.expa.releaseFieldStorage
+  procCall Ggauge(x).releaseStorage
+
+method bufferProto(x: GstoutUpdate): Gvalue =
+  let g = Ggauge(procCall Ggauge(x).bufferProto).gval
+  GstoutUpdate(runtime:x.runtime,gval:g,expa:x.expa.newShape).assignStableNodeId
+
+method bufferCompatible(x: GstoutUpdate, y: Gvalue): bool =
+  y of GstoutUpdate and (procCall Ggauge(x).bufferCompatible(y)) and
+    x.expa.l == GstoutUpdate(y).expa.l
+
+method bindBuffer(x: GstoutUpdate, buffer: Gvalue) =
+  procCall Ggauge(x).bindBuffer(buffer)
+  x.expa = GstoutUpdate(buffer).expa
+
+method clearBuffer(x: GstoutUpdate) =
+  procCall Ggauge(x).clearBuffer
+  threads:
+    x.expa := 0.0
+
+method bufferBytes(x: GstoutUpdate): int =
+  (procCall Ggauge(x).bufferBytes) + x.expa.s.bytes
+
+method valCopy(z: GstoutUpdate, x: Gvalue) =
+  if not (x of GstoutUpdate):
+    raiseValueError("stout cached copy requires an exponential payload")
+  procCall Ggauge(z).valCopy(x)
+  threads:
+    z.expa := GstoutUpdate(x).expa
+
+method valAlias(z: GstoutUpdate, x: Gvalue) =
+  if not (x of GstoutUpdate):
+    raiseValueError("stout cached alias requires an exponential payload")
+  procCall Ggauge(z).valAlias(x)
+  z.expa = GstoutUpdate(x).expa
+
 method newOneOf(x: GstoutUpdate): Gvalue =
-  let g = x.gval.newOneOf
-  g.zeroGaugeStorage
+  let g = x.gaugeNodeLike.gval
   GstoutUpdate(
     runtime: x.runtime,
     gval: g,
-    expa: x.expa.newOneOf).assignStableNodeId
+    expa: x.expa.newShape).assignStableNodeId
+
+proc stoutCache[T:GstoutUpdate](x: T): T =
+  ## Evaluation-only payload: derivative replicas use the live W/ds/alpha slots.
+  proc inputs(v: Gvalue, mode: InputWalkMode, visit: GnodeVisit) =
+    if mode != iwmBackward:
+      visit v.inputs[0]
+  proc forward(v: Gvalue) =
+    v.valAlias(v.inputs[0])
+  let view = T(x.newOneOf)
+  graphNode(view,@[Gvalue(x)],Gfunc(bufferMode: bmAlias, aliasInputs: @[0], forward:forward,inputView:inputs,name:"stoutCache"),"stoutCache")
 
 proc stoutUpdateImpl(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): GstoutUpdate =
   ## W' = exp(alpha*projectTAH(W ds†))*W on (parity,dir).
@@ -102,19 +236,7 @@ proc stoutUpdateImpl(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): GstoutUpd
     let ds = Ggauge(args.storedSlot(1))
     let alpha = Gscalar(args.storedSlot(2))
     let z = GstoutUpdate(v)
-    threads:
-      for mu in 0..<z.gval.len:
-        if mu != dir:
-          z.gval[mu] := W.gval[mu]
-      for x in other:
-        z.gval[dir][x] := W.gval[dir][x]
-      for x in sub:
-        var A, F, E {.noinit.}: evalType(W.gval[dir][x])
-        F.projectTAH(W.gval[dir][x] * ds.gval[dir][x].adj)
-        A := alpha.sval * F
-        E[] := expAH(A[])
-        z.expa[x] := E
-        z.gval[dir][x] := E * W.gval[dir][x]
+    stoutStepKernel(z.gval, W.gval, ds.gval, z.expa, alpha = alpha.sval, parity = parity, dir = dir)
     toc("stoutUpdate kernel end")
 
   proc gradPair(W, ds: Ggauge, alpha: Gscalar, upstream: Ggauge, update: GstoutUpdate): Gmulti =
@@ -124,7 +246,7 @@ proc stoutUpdateImpl(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): GstoutUpd
     var values = @[Gvalue(W), Gvalue(ds), Gvalue(alpha)]
     for term in terms:
       values.add Gvalue(term)
-    values.add Gvalue(update)
+    values.add Gvalue(stoutCache(update))
     let gradArgs = multiValues("stoutUpdateGrad args", values)
     proc kf(v: Gvalue) =
       tic("stoutUpdateGrad kernel")
@@ -137,30 +259,21 @@ proc stoutUpdateImpl(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): GstoutUpd
       let dW = Ggauge(z.storedSlot(0))
       let dds = Ggauge(z.storedSlot(1))
       template upstreamSum(mu, x: untyped): untyped =
-        block:
-          var r {.noinit.}: evalType(W.gval[mu][x])
-          r := Ggauge(args.storedSlot(3)).gval[mu][x]
-          for j in 1..<nterms:
-            r += Ggauge(args.storedSlot(3 + j)).gval[mu][x]
-          r
+        gaugeTermSum(nterms,j,Ggauge(args.storedSlot(3+j)).gval[mu][x])
       threads:
-        for mu in 0..<dW.gval.len:
-          if mu != dir:
-            for x in dW.gval[mu]:
-              dW.gval[mu][x] := upstreamSum(mu, x)
-        for x in other:
-          dW.gval[dir][x] := upstreamSum(dir, x)
-        for x in sub:
-          let
-            w = W.gval[dir][x]
-            d = ds.gval[dir][x]
-            b = upstreamSum(dir, x)
-          var B, P {.noinit.}: evalType(w)
-          B := update.expa[x].adj * b
-          expProjectTAHPullback(P[], (alpha.sval * (w * d.adj))[], (B * w.adj)[])
-          let H = alpha.sval * P
-          dW.gval[dir][x] := B + H * d
-          dds.gval[dir][x] := H.adj * w
+        forGaugeBlend(dW.gval,sub,other,dir,true):
+          when active:
+            let
+              w = W.gval[mu][e]
+              d = ds.gval[mu][e]
+              b = upstreamSum(mu,e)
+            var rw, rd, M {.noinit.}: evalType(w)
+            M := alpha.sval * (w * d.adj)
+            stoutPullbackSite(rw, rd, w, d, update.expa[e], M, b, alpha.sval, 0.0)
+            dW.gval[mu][e] := rw
+            dds.gval[mu][e] := rd
+          else:
+            dW.gval[mu][e] := upstreamSum(mu,e)
       toc("stoutUpdateGrad kernel end")
     proc kb(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
       # Outputs (dW, dds) are the W and ds pullbacks of the update with
@@ -171,8 +284,7 @@ proc stoutUpdateImpl(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): GstoutUpd
         proc(R, sW, sds: Ggauge, sa: Gscalar, u: Ggauge): Gscalar =
           redot(Ggauge(v[0]), Ggauge(gradSeeded(R, sW, u))) +
           redot(Ggauge(v[1]), Ggauge(gradSeeded(R, sds, u))))
-    result = newMultiOutputNode(@[Gvalue(W), Gvalue(ds)], @[Gvalue(gradArgs)], Gfunc(forward: kf, backward: kb, name: "stoutUpdateGrad"), "stoutUpdateGrad")
-    Ggauge(result.storedSlot(1)).zeroGaugeStorage
+    result = newMultiOutputNode(@[Gvalue(W), Gvalue(ds)], @[Gvalue(gradArgs)], Gfunc(bufferMode: bmZero, forward: kf, backward: kb, name: "stoutUpdateGrad"), "stoutUpdateGrad")
 
   proc alphaGrad(W, ds: Ggauge, alpha: Gscalar, upstream: Ggauge): Gscalar =
     let terms = upstream.addTerms
@@ -195,10 +307,7 @@ proc stoutUpdateImpl(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): GstoutUpd
           let
             w = W.gval[dir][x]
             d = ds.gval[dir][x]
-          var b {.noinit.}: evalType(w)
-          b := Ggauge(args.storedSlot(3)).gval[dir][x]
-          for j in 1..<nterms:
-            b += Ggauge(args.storedSlot(3 + j)).gval[dir][x]
+          let b = gaugeTermSum(nterms,j,Ggauge(args.storedSlot(3+j)).gval[dir][x])
           var F, D {.noinit.}: evalType(w)
           F.projectTAH(w * d.adj)
           D := expDeriv(alpha.sval * F, b * w.adj)
@@ -214,7 +323,7 @@ proc stoutUpdateImpl(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): GstoutUpd
       replicaSlotGrads(Gmulti(z.inputs[0]), nterms, 0, parity, dir,
         proc(R, sW, sds: Ggauge, sa: Gscalar, u: Ggauge): Gscalar =
           s * Gscalar(gradSeeded(R, sa, u)))
-    graphNode(scalarNodeLike(alpha), @[Gvalue(gradArgs)], Gfunc(forward: kf, backward: kb, name: "stoutUpdateAlphaGrad"), "stoutUpdateAlphaGrad")
+    graphNode(scalarNodeLike(alpha), @[Gvalue(gradArgs)], Gfunc(bufferMode: bmFull, forward: kf, backward: kb, name: "stoutUpdateAlphaGrad"), "stoutUpdateAlphaGrad")
 
   proc backward(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
     let args = Gmulti(z.inputs[0])
@@ -234,15 +343,14 @@ proc stoutUpdateImpl(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): GstoutUpd
     requireLogdetAuxIndependent(W, alpha, "stoutUpdate", "alpha")
     (Gvalue(stoutLogDetJ(W, ds, alpha, parity, dir)), Gvalue(W))
 
-  let g = W.gval.newOneOf
-  g.zeroGaugeStorage
+  let g = W.gaugeNodeLike.gval
   graphNode(
     GstoutUpdate(
       runtime: W.runtime,
       gval: g,
-      expa: W.gval[dir].newOneOf),
+      expa: W.gval[dir].newShape),
     @[Gvalue(args)],
-    Gfunc(forward: forward, backward: backward, logdet: ldj, name: "stoutUpdate"),
+    Gfunc(bufferMode: bmZero, forward: forward, backward: backward, logdet: ldj, name: "stoutUpdate"),
     "stoutUpdate")
 
 proc stoutUpdate*(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): Ggauge =
@@ -273,7 +381,7 @@ proc stoutLogDetJ*(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): Gscalar =
       for x in sub:
         var M {.noinit.}: evalType(W.gval[dir][x])
         M := alpha.sval * (W.gval[dir][x] * ds.gval[dir][x].adj)
-        s += simdSum(expProjMulLogJac(M[]))
+        s += simdSum(expProjMulLogJac(M[], order=expProjectTAHOrder, scale=expProjectTAHScale))
       s.threadRankSum
       threadSingle: res = s
     z.sval = res
@@ -299,17 +407,20 @@ proc stoutLogDetJ*(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): Gscalar =
           var q, M, G {.noinit.}: evalType(w)
           q := w * d.adj
           M := alpha.sval * q
-          expProjMulLogJacGrad(G[], M[])
+          expProjMulLogJacGrad(G[], M[], order=expProjectTAHOrder, scale=expProjectTAHScale)
           let H = (upstream.sval * alpha.sval) * G
           dW.gval[dir][x] := H * d
           dds.gval[dir][x] := H.adj * w
       toc("stoutLogDetJgrad kernel end")
     proc kb(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
-      raiseUnsupportedPath("stoutLogDetJ grad kernel backward", "stout log-Jacobian gradient is not differentiated")
-    let kfn = Gfunc(forward: kf, backward: kb, name: "stoutLogDetJgrad")
+      let v = Gmulti(rootedUpstream(zb, z))
+      replicaInputGrads(Gmulti(z.inputs[0]), 4,
+        proc(s: seq[Gvalue]): Gscalar =
+          let l = stoutLogDetJGraph(Ggauge(s[0]), Ggauge(s[1]), Gscalar(s[2]), parity, dir)
+          redot(Ggauge(v[0]), Ggauge(gradSeeded(l, s[0], s[3]))) +
+            redot(Ggauge(v[1]), Ggauge(gradSeeded(l, s[1], s[3]))))
+    let kfn = Gfunc(bufferMode: bmZero, forward: kf, backward: kb, name: "stoutLogDetJgrad")
     result = newMultiOutputNode(@[Gvalue(W), Gvalue(ds)], @[Gvalue(gradArgs)], kfn, "stoutLogDetJgrad")
-    Ggauge(result.storedSlot(0)).zeroGaugeStorage
-    Ggauge(result.storedSlot(1)).zeroGaugeStorage
 
   proc alphaGrad(W, ds: Ggauge, alpha, upstream: Gscalar): Gscalar =
     let gradArgs = multiValues("stoutLogDetJalphaGrad args", W, ds, alpha, upstream)
@@ -331,7 +442,7 @@ proc stoutLogDetJ*(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): Gscalar =
           var q, M, G {.noinit.}: evalType(w)
           q := w * d.adj
           M := alpha.sval * q
-          expProjMulLogJacGrad(G[], M[])
+          expProjMulLogJacGrad(G[], M[], order=expProjectTAHOrder, scale=expProjectTAHScale)
           let r = redot(G, q)
           s += upstream.sval * simdSum(r)
         s.threadRankSum
@@ -339,8 +450,12 @@ proc stoutLogDetJ*(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): Gscalar =
       z.sval = da
       toc("stoutLogDetJalphaGrad kernel end")
     proc kb(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
-      raiseUnsupportedPath("stoutLogDetJ alpha gradient backward", "higher stout log-Jacobian derivatives")
-    graphNode(scalarNodeLike(alpha), @[Gvalue(gradArgs)], Gfunc(forward: kf, backward: kb, name: "stoutLogDetJalphaGrad"), "stoutLogDetJalphaGrad")
+      let v = Gscalar(rootedUpstream(zb, z))
+      replicaInputGrads(Gmulti(z.inputs[0]), 4,
+        proc(s: seq[Gvalue]): Gscalar =
+          let l = stoutLogDetJGraph(Ggauge(s[0]), Ggauge(s[1]), Gscalar(s[2]), parity, dir)
+          v * Gscalar(gradSeeded(l, s[2], s[3])))
+    graphNode(scalarNodeLike(alpha), @[Gvalue(gradArgs)], Gfunc(bufferMode: bmFull, forward: kf, backward: kb, name: "stoutLogDetJalphaGrad"), "stoutLogDetJalphaGrad")
 
   proc backward(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
     let args = Gmulti(z.inputs[0])
@@ -351,7 +466,7 @@ proc stoutLogDetJ*(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): Gscalar =
     let pair = gradPair(W, ds, alpha, upstream)
     Gvalue(multiValues("stoutLogDetJ input gradients", gaugeGradSlot(pair, 0), gaugeGradSlot(pair, 1), alphaGrad(W, ds, alpha, upstream)))
 
-  let f = Gfunc(forward: forward, backward: backward, name: "stoutLogDetJ")
+  let f = Gfunc(bufferMode: bmFull, forward: forward, backward: backward, name: "stoutLogDetJ")
   graphNode(scalarNodeLike(W), @[Gvalue(args)], f, "stoutLogDetJ")
 
 # --- grouped stout update and log-Jacobian backward --------------------------
@@ -375,32 +490,83 @@ proc stoutActionStepParentInputView(v: Gvalue, mode: InputWalkMode, visit: Gnode
 type GstoutStepPullback = ref object of Ggauge
   hdir: DLatticeColorMatrixV
 
+method ensureStorage(x: GstoutStepPullback) =
+  x.hdir.ensureFieldStorage
+  procCall Ggauge(x).ensureStorage
+
+method releaseWork(x: GstoutStepPullback) =
+  x.hdir.releaseFieldStorage
+
+method releaseStorage(x: GstoutStepPullback) =
+  x.releaseWork
+  procCall Ggauge(x).releaseStorage
+
 method newOneOf(x: GstoutStepPullback): Gvalue =
-  let g = x.gval.newOneOf
-  g.zeroGaugeStorage
+  let g = x.gaugeNodeLike.gval
   GstoutStepPullback(
     runtime: x.runtime,
     gval: g,
-    hdir: x.hdir.newOneOf).assignStableNodeId
+    hdir: x.hdir.newShape).assignStableNodeId
 
 type GstoutStepForward = ref object of GstoutUpdate
   m: DLatticeColorMatrixV
 
+method hasStorage(x: GstoutStepForward): bool =
+  (procCall GstoutUpdate(x).hasStorage) and not x.m.s.data.isNil
+
+method ensureStorage(x: GstoutStepForward) =
+  x.m.ensureFieldStorage
+  procCall GstoutUpdate(x).ensureStorage
+
+method releaseStorage(x: GstoutStepForward) =
+  x.m.releaseFieldStorage
+  procCall GstoutUpdate(x).releaseStorage
+
+method bufferProto(x: GstoutStepForward): Gvalue =
+  let g = Ggauge(procCall Ggauge(x).bufferProto).gval
+  GstoutStepForward(runtime:x.runtime,gval:g,
+    expa:x.expa.newShape,m:x.m.newShape).assignStableNodeId
+
+method bufferCompatible(x: GstoutStepForward, y: Gvalue): bool =
+  y of GstoutStepForward and (procCall GstoutUpdate(x).bufferCompatible(y)) and
+    x.m.l == GstoutStepForward(y).m.l
+
+method bindBuffer(x: GstoutStepForward, buffer: Gvalue) =
+  procCall GstoutUpdate(x).bindBuffer(buffer)
+  x.m = GstoutStepForward(buffer).m
+
+method clearBuffer(x: GstoutStepForward) =
+  procCall GstoutUpdate(x).clearBuffer
+  threads:
+    x.m := 0.0
+
+method bufferBytes(x: GstoutStepForward): int =
+  (procCall GstoutUpdate(x).bufferBytes) + x.m.s.bytes
+
+method valCopy(z: GstoutStepForward, x: Gvalue) =
+  if not (x of GstoutStepForward):
+    raiseValueError("stout cached copy requires a Jacobian payload")
+  procCall GstoutUpdate(z).valCopy(x)
+  threads:
+    z.m := GstoutStepForward(x).m
+
+method valAlias(z: GstoutStepForward, x: Gvalue) =
+  if not (x of GstoutStepForward):
+    raiseValueError("stout cached alias requires a Jacobian payload")
+  procCall GstoutUpdate(z).valAlias(x)
+  z.m = GstoutStepForward(x).m
+
 method newOneOf(x: GstoutStepForward): Gvalue =
-  let g = x.gval.newOneOf
-  g.zeroGaugeStorage
+  let g = x.gaugeNodeLike.gval
   GstoutStepForward(
     runtime: x.runtime,
     gval: g,
-    expa: x.expa.newOneOf,
-    m: x.m.newOneOf).assignStableNodeId
+    expa: x.expa.newShape,
+    m: x.m.newShape).assignStableNodeId
 
 proc stoutStepForwardImpl(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): GstoutStepForward =
   W.requireSameGaugeShape(ds, "stoutStepForward")
-  let
-    sub = W.gval.paritySubset(parity)
-    other = W.gval.paritySubset(1 - parity)
-    args = multiValues("stoutStepForward args", W, ds, alpha)
+  let args = multiValues("stoutStepForward args", W, ds, alpha)
 
   proc forward(v: Gvalue) =
     tic("stoutStepForward kernel")
@@ -410,39 +576,21 @@ proc stoutStepForwardImpl(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): Gsto
       ds = Ggauge(args.storedSlot(1))
       alpha = Gscalar(args.storedSlot(2))
       z = GstoutStepForward(v)
-    threads:
-      for mu in 0..<z.gval.len:
-        if mu != dir:
-          z.gval[mu] := W.gval[mu]
-      for x in other:
-        z.gval[dir][x] := W.gval[dir][x]
-      for x in sub:
-        let
-          w = W.gval[dir][x]
-          d = ds.gval[dir][x]
-        var q, M, F, E {.noinit.}: evalType(w)
-        q := w * d.adj
-        M := alpha.sval * q
-        F.projectTAH M
-        E[] := expAH(F[])
-        z.expa[x] := E
-        z.m[x] := M
-        z.gval[dir][x] := E * w
+    stoutStepKernel(z.gval, W.gval, ds.gval, z.expa, z.m, alpha.sval, parity, dir)
     toc("stoutStepForward kernel end")
 
   proc backward(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
     raiseUnsupportedPath("stoutStepForward backward", "use the grouped stout outputs")
 
-  let g = W.gval.newOneOf
-  g.zeroGaugeStorage
+  let g = W.gaugeNodeLike.gval
   graphNode(
     GstoutStepForward(
       runtime: W.runtime,
       gval: g,
-      expa: W.gval[dir].newOneOf,
-      m: W.gval[dir].newOneOf),
+      expa: W.gval[dir].newShape,
+      m: W.gval[dir].newShape),
     @[Gvalue(args)],
-    Gfunc(forward: forward, backward: backward, name: "stoutStepForward"),
+    Gfunc(bufferMode: bmZero, forward: forward, backward: backward, name: "stoutStepForward"),
     "stoutStepForward")
 
 proc stoutStepLogDetValue(x: GstoutStepForward, parity, dir: int): Gscalar =
@@ -456,14 +604,14 @@ proc stoutStepLogDetValue(x: GstoutStepForward, parity, dir: int): Gscalar =
     threads:
       var s = 0.0
       for i in sub:
-        s += simdSum(expProjMulLogJac(x.m[i][]))
+        s += simdSum(expProjMulLogJac(x.m[i][], order=expProjectTAHOrder, scale=expProjectTAHScale))
       s.threadRankSum
       threadSingle: res = s
     z.sval = res
     toc("stoutStepLogDetJ kernel end")
   proc backward(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
     raiseUnsupportedPath("stoutStepLogDetValue backward", "use the grouped stout outputs")
-  graphNode(scalarNodeLike(x), @[Gvalue(x)], Gfunc(forward: forward, backward: backward, name: "stoutStepLogDetValue"), "stoutStepLogDetValue")
+  graphNode(scalarNodeLike(x), @[Gvalue(x)], Gfunc(bufferMode: bmFull, forward: forward, backward: backward, name: "stoutStepLogDetValue"), "stoutStepLogDetValue")
 
 proc stoutUpdateLogDetJImpl(W, ds: Ggauge, alpha: Gscalar, c: Gactcoeff, parity, dir: int, fuseHess: static bool): tuple[Wnew: Ggauge, lj: Gscalar] =
   ## Share the update/log-Jacobian forward and pullback.
@@ -495,7 +643,7 @@ proc stoutUpdateLogDetJImpl(W, ds: Ggauge, alpha: Gscalar, c: Gactcoeff, parity,
       values.add Gvalue(upLog)
     let updateIndex = values.len
     if hasUpdate or hasLog:
-      values.add Gvalue(updateBase)
+      values.add Gvalue(stoutCache(updateBase))
     let gradArgs = multiValues(
       when fuseHess: "stoutStepGradHess args"
       else: "stoutStepGrad args", values)
@@ -525,12 +673,7 @@ proc stoutUpdateLogDetJImpl(W, ds: Ggauge, alpha: Gscalar, c: Gactcoeff, parity,
           dds = Ggauge(z.storedSlot(1))
         dW = Ggauge(z.storedSlot(0))
       template upstreamSum(mu, x: untyped): untyped =
-        block:
-          var r {.noinit.}: evalType(W.gval[mu][x])
-          r := Ggauge(args.storedSlot(termIndex)).gval[mu][x]
-          for j in 1..<nterms:
-            r += Ggauge(args.storedSlot(termIndex + j)).gval[mu][x]
-          r
+        gaugeTermSum(nterms,j,Ggauge(args.storedSlot(termIndex+j)).gval[mu][x])
       threads:
         when fuseHess:
           if not hasUpdate:
@@ -538,55 +681,31 @@ proc stoutUpdateLogDetJImpl(W, ds: Ggauge, alpha: Gscalar, c: Gactcoeff, parity,
               dW.gval[mu] := 0.0
             # Full-field and subset loops distribute sites differently.
             threadBarrier()
-        if hasUpdate:
-          when fuseHess:
-            if nterms != 1:
-              for mu in 0..<dW.gval.len:
-                if mu != dir:
-                  for x in dW.gval[mu]:
-                    dW.gval[mu][x] := upstreamSum(mu, x)
-              for x in other:
-                dW.gval[dir][x] := upstreamSum(dir, x)
-          else:
-            for mu in 0..<dW.gval.len:
-              if mu != dir:
-                for x in dW.gval[mu]:
-                  dW.gval[mu][x] := upstreamSum(mu, x)
-            for x in other:
-              dW.gval[dir][x] := upstreamSum(dir, x)
-        for x in sub:
-          let
-            w = W.gval[dir][x]
-            d = ds.gval[dir][x]
-          var rw, rd {.noinit.}: evalType(w)
-          rw := 0.0
-          rd := 0.0
-          if hasUpdate:
-            let base = upstreamSum(dir, x)
-            var B, P {.noinit.}: evalType(w)
-            B := update.expa[x].adj * base
-            if hasLog:
+        forGaugeBlend(dW.gval,sub,other,dir,hasUpdate and (not fuseHess or nterms != 1)):
+          when active:
+            let
+              w = W.gval[mu][e]
+              d = ds.gval[mu][e]
+            var rw, rd {.noinit.}: evalType(w)
+            rw := 0.0
+            rd := 0.0
+            if hasUpdate:
+              let base = upstreamSum(mu,e)
+              stoutPullbackSite(rw, rd, w, d, update.expa[e], update.m[e], base, alpha.sval,
+                if hasLog: upLog.sval else: 0.0)
+            elif hasLog:
               var G {.noinit.}: evalType(w)
-              expProjMulLogJacGrad(G[], P[], update.m[x][], (B * w.adj)[])
-              let H = alpha.sval * P + (upLog.sval * alpha.sval) * G
-              rw := B + H * d
+              expProjMulLogJacGrad(G[], update.m[e][], order=expProjectTAHOrder, scale=expProjectTAHScale)
+              let H = (upLog.sval * alpha.sval) * G
+              rw := H * d
               rd := H.adj * w
+            dW.gval[mu][e] := rw
+            when fuseHess:
+              pull.hdir[e] := rd
             else:
-              expProjectTAHPullback(P[], update.m[x][], (B * w.adj)[])
-              let H = alpha.sval * P
-              rw := B + H * d
-              rd := H.adj * w
-          elif hasLog:
-            var G {.noinit.}: evalType(w)
-            expProjMulLogJacGrad(G[], update.m[x][])
-            let H = (upLog.sval * alpha.sval) * G
-            rw := H * d
-            rd := H.adj * w
-          dW.gval[dir][x] := rw
-          when fuseHess:
-            pull.hdir[x] := rd
+              dds.gval[mu][e] := rd
           else:
-            dds.gval[dir][x] := rd
+            dW.gval[mu][e] := upstreamSum(mu,e)
       when fuseHess:
         toc("stoutStepGradHess direction end")
         let coeff = Gactcoeff(args.storedSlot(3))
@@ -599,7 +718,18 @@ proc stoutUpdateLogDetJImpl(W, ds: Ggauge, alpha: Gscalar, c: Gactcoeff, parity,
         toc("stoutStepGrad kernel end")
 
     proc kb(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
-      raiseUnsupportedPath("stoutStep gradient backward", "higher stout derivatives")
+      let v = rootedUpstream(zb, z)
+      replicaInputGrads(Gmulti(z.inputs[0]), updateIndex,
+        proc(s: seq[Gvalue]): Gscalar =
+          let score = stoutScore(s, termIndex, nterms, logIndex, hasLog, parity, dir)
+          let one = toGvalue(score.runtime, 1.0)
+          let dw = Ggauge(gradSeeded(score, s[0], one))
+          let dd = Ggauge(gradSeeded(score, s[1], one))
+          when fuseHess:
+            let h = gaugeActionDeriv2(dd, Gactcoeff(s[3]), Ggauge(s[0]))
+            redot(Ggauge(v), dw + h)
+          else:
+            redot(Ggauge(Gmulti(v)[0]), dw) + redot(Ggauge(Gmulti(v)[1]), dd))
 
     when fuseHess:
       let z = W.gaugeNodeLike
@@ -607,14 +737,12 @@ proc stoutUpdateLogDetJImpl(W, ds: Ggauge, alpha: Gscalar, c: Gactcoeff, parity,
         GstoutStepPullback(
           runtime: z.runtime,
           gval: z.gval,
-          hdir: W.gval[dir].newOneOf),
+          hdir: W.gval[dir].newShape),
         @[Gvalue(gradArgs)],
-        Gfunc(forward: kf, backward: kb, name: "stoutStepGradHess"),
+        Gfunc(bufferMode: bmFull, forward: kf, backward: kb, name: "stoutStepGradHess"),
         "stoutStepGradHess")
     else:
-      let z = newMultiOutputNode(@[Gvalue(W), Gvalue(ds)], @[Gvalue(gradArgs)], Gfunc(forward: kf, backward: kb, name: "stoutStepGrad"), "stoutStepGrad")
-      Ggauge(z.storedSlot(0)).zeroGaugeStorage
-      Ggauge(z.storedSlot(1)).zeroGaugeStorage
+      let z = newMultiOutputNode(@[Gvalue(W), Gvalue(ds)], @[Gvalue(gradArgs)], Gfunc(bufferMode: bmZero, forward: kf, backward: kb, name: "stoutStepGrad"), "stoutStepGrad")
       result = Gvalue(z)
 
   proc alphaGrad(W, ds: Ggauge, alpha: Gscalar, updateBase: GstoutStepForward, upUpdate: Ggauge, upLog: Gscalar): Gscalar =
@@ -633,7 +761,7 @@ proc stoutUpdateLogDetJImpl(W, ds: Ggauge, alpha: Gscalar, c: Gactcoeff, parity,
       values.add Gvalue(upLog)
     let updateIndex = values.len
     if hasLog:
-      values.add Gvalue(updateBase)
+      values.add Gvalue(stoutCache(updateBase))
     let gradArgs = multiValues("stoutStepAlphaGrad args", values)
 
     proc kf(v: Gvalue) =
@@ -659,17 +787,14 @@ proc stoutUpdateLogDetJImpl(W, ds: Ggauge, alpha: Gscalar, c: Gactcoeff, parity,
           var q {.noinit.}: evalType(w)
           q := w * d.adj
           if hasUpdate:
-            var b {.noinit.}: evalType(w)
-            b := Ggauge(args.storedSlot(3)).gval[dir][x]
-            for j in 1..<nterms:
-              b += Ggauge(args.storedSlot(3 + j)).gval[dir][x]
+            let b = gaugeTermSum(nterms,j,Ggauge(args.storedSlot(3+j)).gval[dir][x])
             var F, D {.noinit.}: evalType(w)
             F.projectTAH q
             D := expDeriv(alpha.sval * F, b * w.adj)
             s += simdSum(redot(D, F))
           if hasLog:
             var G {.noinit.}: evalType(w)
-            expProjMulLogJacGrad(G[], update.m[x][])
+            expProjMulLogJacGrad(G[], update.m[x][], order=expProjectTAHOrder, scale=expProjectTAHScale)
             s += upLog.sval * simdSum(redot(G, q))
         s.threadRankSum
         threadSingle: da = s
@@ -677,9 +802,13 @@ proc stoutUpdateLogDetJImpl(W, ds: Ggauge, alpha: Gscalar, c: Gactcoeff, parity,
       toc("stoutStepAlphaGrad kernel end")
 
     proc kb(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
-      raiseUnsupportedPath("stoutStep alpha gradient backward", "higher stout derivatives")
+      let v = Gscalar(rootedUpstream(zb, z))
+      replicaInputGrads(Gmulti(z.inputs[0]), updateIndex,
+        proc(s: seq[Gvalue]): Gscalar =
+          let score = stoutScore(s, 3, nterms, logIndex, hasLog, parity, dir)
+          v * Gscalar(gradSeeded(score, s[2], toGvalue(score.runtime, 1.0))))
 
-    graphNode(scalarNodeLike(alpha), @[Gvalue(gradArgs)], Gfunc(forward: kf, backward: kb, name: "stoutStepAlphaGrad"), "stoutStepAlphaGrad")
+    graphNode(scalarNodeLike(alpha), @[Gvalue(gradArgs)], Gfunc(bufferMode: bmFull, forward: kf, backward: kb, name: "stoutStepAlphaGrad"), "stoutStepAlphaGrad")
 
   proc parentForward(v: Gvalue) = discard
 
@@ -698,7 +827,11 @@ proc stoutUpdateLogDetJImpl(W, ds: Ggauge, alpha: Gscalar, c: Gactcoeff, parity,
       of 0:
         gradPair(W, ds, alpha, c, updateBase, upUpdate, upLog)
       of 1:
-        raiseUnsupportedPath("stoutStep backward", "derivative with respect to gauge-action coefficients")
+        let sc = slotVar(c)
+        let sd = gaugeActionDeriv(sc, W, parity, dir)
+        let st = stoutUpdateLogDetJImpl(W, sd, alpha, nil, parity, dir, false)
+        let score = redot(upUpdate, st.Wnew) + upLog * st.lj
+        gradSeeded(score, sc, toGvalue(c.runtime, 1.0))
       of 2:
         Gvalue(alphaGrad(W, ds, alpha, updateBase, upUpdate, upLog))
       else:
@@ -723,7 +856,7 @@ proc stoutUpdateLogDetJImpl(W, ds: Ggauge, alpha: Gscalar, c: Gactcoeff, parity,
   var parentFunc: Gfunc
   when fuseHess:
     parentInputs = @[Gvalue(W), Gvalue(c), Gvalue(alpha), Gvalue(ds), Gvalue(updateBase), Gvalue(logdetBase)]
-    parentFunc = Gfunc(
+    parentFunc = Gfunc(bufferMode: bmFull,
       forward: parentForward,
       backward: parentBackward,
       inputView: stoutActionStepParentInputView,
@@ -733,7 +866,7 @@ proc stoutUpdateLogDetJImpl(W, ds: Ggauge, alpha: Gscalar, c: Gactcoeff, parity,
       logdetBaseInput = 5
   else:
     parentInputs = @[Gvalue(args), Gvalue(updateBase), Gvalue(logdetBase)]
-    parentFunc = Gfunc(
+    parentFunc = Gfunc(bufferMode: bmFull,
       forward: parentForward,
       backward: parentBackward,
       inputView: stoutStepParentInputView,
@@ -753,7 +886,7 @@ proc stoutUpdateLogDetJImpl(W, ds: Ggauge, alpha: Gscalar, c: Gactcoeff, parity,
     let parent = Gmulti(z.inputs[0])
     Gvalue(multiValues("stoutStep logdet cotangents", parent.inputs[updateBaseInput].zeroLike, upstream))
 
-  let ljFunc = Gfunc(forward: logdetForward, backward: logdetBackward,
+  let ljFunc = Gfunc(bufferMode: bmFull, forward: logdetForward, backward: logdetBackward,
     inputView: stoutStepOutputView, name: "stoutStepLogDet")
   result.lj = graphNode(scalarNodeLike(logdetBase),
     @[Gvalue(parent), Gvalue(logdetBase)], ljFunc, "stoutStepLogDet")
@@ -791,7 +924,7 @@ proc stoutUpdateLogDetJImpl(W, ds: Ggauge, alpha: Gscalar, c: Gactcoeff, parity,
   # copies it, while the input view excludes it from ordinary traversal.
   result.Wnew = graphNode(
     updateView, @[Gvalue(parent), Gvalue(updateBase), Gvalue(result.lj)],
-    Gfunc(forward: updateForward, backward: updateBackward, inputView: stoutStepOutputView, logdet: updateLdj, name: "stoutStepUpdate"),
+    Gfunc(bufferMode: bmAlias, aliasInputs: @[1], forward: updateForward, backward: updateBackward, inputView: stoutStepOutputView, logdet: updateLdj, name: "stoutStepUpdate"),
     "stoutStepUpdate")
 
 proc stoutUpdateLogDetJ*(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): tuple[Wnew: Ggauge, lj: Gscalar] =
@@ -800,8 +933,9 @@ proc stoutUpdateLogDetJ*(W, ds: Ggauge, alpha: Gscalar, parity, dir: int): tuple
   stoutUpdateLogDetJImpl(W, ds, alpha, nil, parity, dir, false)
 
 proc stoutUpdateLogDetJ*(W: Ggauge, c: Gactcoeff, alpha: Gscalar, parity, dir: int): tuple[Wnew: Ggauge, lj: Gscalar] =
-  ## As above; form the subset-frozen ds internally and fuse its Hessian
-  ## pullback. The generic factorization requires c and alpha to be independent
-  ## of W.
-  let ds = gaugeActionDeriv(c, W, parity, dir)
-  stoutUpdateLogDetJImpl(W, ds, alpha, c, parity, dir, true)
+  ## Wilson coefficients give independent active-link Jacobian blocks.
+  ## Coefficient tangents are restricted to plaq. The generic factorization
+  ## additionally requires c and alpha to be independent of W.
+  let checked = stoutCoeff(c, c)
+  let ds = gaugeActionDeriv(checked, W, parity, dir)
+  stoutUpdateLogDetJImpl(W, ds, alpha, checked, parity, dir, true)

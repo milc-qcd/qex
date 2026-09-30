@@ -300,6 +300,10 @@ template basicDefs(T,F,N,P,S:untyped) {.dirty.} =
   map1(T,N, cos)
   map1(T,N, acos)
   map1(T,N, tanh)
+  map1(T,N, exp)
+  map1(T,N, ln)
+  map1(T,N, erfc)
+  map1(T,N, arctan)
   map2(T,N, atan2)
 
 basicDefs(m128,  float32,  4, mm, ps)
@@ -440,11 +444,10 @@ proc assign*(r: var m128, x: m256d) {.alwaysInline.} =
   r = mm256_cvtpd_ps(x)
 proc assign*(r: var m256d, x: m128) {.alwaysInline.} =
   r = mm256_cvtps_pd(x)
-#proc assign*(r: var m128, x: array[2,m128d]) {.alwaysInline.} =
-#  let t0 = mm_cvtpd_ps(x[0])
-#  let t1 = mm_cvtpd_ps(x[1])
-#  r = mm_castps4_ps128(t0)
-#  r = mm_insertf64_ps(r, t1, 1)
+proc assign*(r: var m128, x: array[2,m128d]) {.alwaysInline.} =
+  let t0 = mm_cvtpd_ps(x[0])
+  let t1 = mm_cvtpd_ps(x[1])
+  r = mm_movelh_ps(t0, t1)
 proc assign*(r: var array[2,m128d], x: m128) {.alwaysInline.} =
   #r[0] = mm_cvtps_pd(mm128_extractf128_ps(x,0))
   #r[1] = mm_cvtps_pd(mm128_extractf128_ps(x,1))

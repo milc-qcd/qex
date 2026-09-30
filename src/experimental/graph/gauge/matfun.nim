@@ -34,7 +34,7 @@ proc expgf(v: Gvalue) =
   z.mapGaugeElements:
     z.gval[mu][e] := exp(x.gval[mu][e])
 
-let expg = Gfunc(forward: expgf, backward: expgb, name: "expg")
+let expg = Gfunc(bufferMode: bmFull, forward: expgf, backward: expgb, name: "expg")
 
 proc exp*(x: Ggauge): Ggauge =
   graphNode(x.gaugeNodeLike, @[Gvalue(x)], expg, "expg")
@@ -63,18 +63,26 @@ proc expPolyGraph*(x: Ggauge): Ggauge =
   result = 1.0 + e
 
 proc expTopReplica*(y: Ggauge, d: openArray[Ggauge]): Ggauge =
-  ## expTop(y; d) as a basic-op graph. For m = 0 it is the polynomial replica;
-  ## otherwise the y-bar rule read backwards, with one fewer direction:
+  ## For Nc = 1, expTop(y; d) = exp(y) * product(d), including m = 0.
+  ## For Nc > 1, m = 0 is the polynomial replica; higher orders use the
+  ## y-bar rule read backwards, with one fewer direction:
   ##   expTop(y; d_1..d_m) = gradSeeded(expTop(slot; d_2^dag..d_m^dag), slot, d_1),
   ##   slot = slotVar(y^dag).
   ## The fallback past m = 3, and the test oracle for the fused nodes.
+  const nc = y.gval[0][0].nrows
+  when nc == 1:
+    result = exp(y)
+    for x in d:
+      y.requireSameGaugeShape(x, "expTopReplica")
+      result = result * x
+    return
   if d.len == 0:
     return expPolyGraph(y)
   let slot = slotVar(y.adj)
   var rest: seq[Ggauge]
   for j in 1 ..< d.len:
     rest.add d[j].adj
-  Ggauge(gradSeeded(expTopReplica(slot, rest), slot, d[0]))
+  result = Ggauge(gradSeeded(expTopReplica(slot, rest), slot, d[0]))
 
 template expJetKernel(v: Gvalue, M: static int) =
   let y = Ggauge(v.inputs[0])
@@ -108,9 +116,9 @@ proc expJetb(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
   expJet(y.adj, ds)
 
 let expJetg = [
-  Gfunc(forward: expJetf1, backward: expJetb, name: "expJet1"),
-  Gfunc(forward: expJetf2, backward: expJetb, name: "expJet2"),
-  Gfunc(forward: expJetf3, backward: expJetb, name: "expJet3")]
+  Gfunc(bufferMode: bmFull, forward: expJetf1, backward: expJetb, name: "expJet1"),
+  Gfunc(bufferMode: bmFull, forward: expJetf2, backward: expJetb, name: "expJet2"),
+  Gfunc(bufferMode: bmFull, forward: expJetf3, backward: expJetb, name: "expJet3")]
 
 proc expJet*(y: Ggauge, d: openArray[Ggauge]): Ggauge =
   ## expTop(y; d_1..d_m) as a graph node; fused kernel for m <= 3.
@@ -160,7 +168,7 @@ proc expDerivgf(v: Gvalue) =
       y.gval[mu][e],
       x.gval[mu][e])
 
-let expDerivg = Gfunc(forward: expDerivgf, backward: expDerivgb, name: "expDerivg")
+let expDerivg = Gfunc(bufferMode: bmFull, forward: expDerivgf, backward: expDerivgb, name: "expDerivg")
 
 proc expDeriv*(b: Ggauge, x: Ggauge, parity = -1, dir = 0): Ggauge =
   ## D exp(x)^*[b], on the whole field or only (parity,dir); zero elsewhere.
@@ -181,6 +189,5 @@ proc expDeriv*(b: Ggauge, x: Ggauge, parity = -1, dir = 0): Ggauge =
     expDerivContribution(
       requireUpstream(zb, "expDeriv subset backward", Ggauge), z, i, parity, dir)
   result = graphNode(node, @[Gvalue(b), Gvalue(x)],
-    Gfunc(forward: fwd, backward: bwd, name: "expDerivg"),
+    Gfunc(bufferMode: bmZero, forward: fwd, backward: bwd, name: "expDerivg"),
     "expDerivg")
-  result.zeroGaugeStorage

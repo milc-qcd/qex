@@ -1,4 +1,5 @@
-import qex, base/hyper, comms/gather, tables
+import base, layout, field, maths, base/hyper, comms/gather, tables
+import physics/color
 getOptimPragmas()
 
 type
@@ -85,7 +86,6 @@ proc makeHaloLayout*[L:Layout](lo: L, fwdOffset,bckOffset: openarray[SomeInteger
     else:
       let par = (paro + x.sum) mod 2
       idxp[par].add int32 i
-      #echo par, " ", x
   var k = int32 nOut
   for p in 0..1:
     for i in idxp[p]:
@@ -194,6 +194,39 @@ proc haloLayout*[L:Layout](lo: L, fwdOffset,bckOffset: openarray[SomeInteger]): 
   b.init bckOffset
   haloLayout(lo, f, b)
 
+proc haloLayout*[L:Layout](lo: L, offsets: seq[seq[int32]]): HaloLayout[L] =
+  ## Widths from the extreme offsets, through the memoized constructor above.
+  ## Offsets must stay inside one period: the map folds a coordinate once.
+  let nd = lo.nDim
+  var fw = newSeq[int32](nd)
+  var bw = newSeq[int32](nd)
+  for off in offsets:
+    if off.len != nd:
+      raise newException(ValueError, "halo offset dimension differs from layout")
+    for d in 0..<nd:
+      if abs(off[d]) >= lo.physGeom[d]:
+        raise newException(ValueError, "halo offset exceeds the periodic extent")
+      fw[d] = max(fw[d], off[d])
+      bw[d] = max(bw[d], -off[d])
+  haloLayout(lo, fw, bw)
+
+proc haloIndex*[L](hl: HaloLayout[L], offsets: seq[seq[int32]]): seq[int32] =
+  ## Extended index of outer site i shifted by offsets[t], at i*offsets.len+t.
+  ## Not cached; each caller owns its table. Offsets must fit the widths.
+  let nd = hl.lo.nDim
+  let nt = offsets.len
+  for off in offsets:
+    for d in 0..<nd:
+      let fwd = int(hl.outerExt[d]) - int(hl.offset[d]) - hl.lo.outerGeom[d]
+      if off[d] > fwd or -off[d] > hl.offset[d]:
+        raise newException(ValueError, "halo offset exceeds the layout widths")
+  result = newSeq[int32](hl.nOut*nt)
+  var x = newSeq[int32](nd)
+  for i in 0..<hl.nOut:
+    x.lexCoord(hl.lex[i], hl.outerExt)
+    for t, off in offsets:
+      result[i*nt+t] = hl.index[(x+off).lexIndex(hl.outerExt)]
+
 proc haloMap*[L](hl: HaloLayout[L], c: Comm, offsets: seq[seq[int32]]): HaloMap[L] =
   var cache {.global.}: Table[(pointer,seq[seq[int32]]), HaloMap[L]]
   let key = (cast[pointer](hl), offsets)
@@ -224,35 +257,35 @@ template makeHalo*[L,F](hl: HaloLayout[L], f: F): auto =
   #makeHalo(hl, f, eval(F.type[0]))
   makeHalo(hl, f, eval(F.type.index(int)))
 
-template copy*[F,T;Rev:static bool](gh: GatherHalo[F,T,Rev], d: pointer, s: SomeInteger) =
-  type E = eval(index(type T, type asSimd(0)))
-  let p = cast[ptr E](d)
-  when Rev:
-    let o = s div gh.vlen
-    let i = s mod gh.vlen
-    p[] := gh.dest[o][asSimd(i)]
+template copy*[F,T;Rev:static bool](gh: GatherHalo[F,T,Rev], d, s: pointer|SomeInteger) =
+  # Keep all three gather transfers in one binding for indirect generic callers.
+  when d is pointer:
+    type E = eval(index(type T, type asSimd(0)))
+    let p = cast[ptr E](d)
+    when Rev:
+      let o = s div gh.vlen
+      let i = s mod gh.vlen
+      p[] := gh.dest[o][asSimd(i)]
+    else:
+      p[] := gh.src{s}
+  elif s is pointer:
+    type E = eval(index(type T,type asSimd(0)))
+    let p = cast[ptr E](s)
+    when Rev:
+      gh.src{d} += p[]
+    else:
+      let o = d div gh.vlen
+      let i = d mod gh.vlen
+      gh.dest[o][asSimd(i)] = p[]
   else:
-    p[] := gh.src{s}
-template copy*[F,T;Rev:static bool](gh: GatherHalo[F,T,Rev], d: SomeInteger, s: pointer) =
-  type E = eval(index(type T,type asSimd(0)))
-  let p = cast[ptr E](s)
-  when Rev:
-    #threadCritical:
-    gh.src{d} += p[]
-  else:
-    let o = d div gh.vlen
-    let i = d mod gh.vlen
-    gh.dest[o][asSimd(i)] = p[]
-template copy*[F,T;Rev:static bool](gh: GatherHalo[F,T,Rev], d: SomeInteger, s: SomeInteger) =
-  when Rev:
-    let o = s div gh.vlen
-    let i = s mod gh.vlen
-    #threadCritical:
-    gh.src{d} += gh.dest[o][asSimd(i)]
-  else:
-    let o = d div gh.vlen
-    let i = d mod gh.vlen
-    gh.dest[o][asSimd(i)] = gh.src{s}
+    when Rev:
+      let o = s div gh.vlen
+      let i = s mod gh.vlen
+      gh.src{d} += gh.dest[o][asSimd(i)]
+    else:
+      let o = d div gh.vlen
+      let i = d mod gh.vlen
+      gh.dest[o][asSimd(i)] = gh.src{s}
 template copy*[F,T;Rev:static bool](gh: GatherHalo[F,T,Rev], dv: SomeInteger, di: array,
                                     s: array, n: SomeInteger) =
   #echo n, " ", dv, " ", di, " ", s
@@ -279,6 +312,7 @@ template copy*[F,T;Rev:static bool](gh: GatherHalo[F,T,Rev], dv: SomeInteger, di
   gh.dest[dv] = t
 
 proc update*[L,F,T](h: Halo[L,F,T], hm: HaloMap[L], c: Comm) =
+  bind copy
   tic("Halo update")
   let elemSize = sizeof(T) div L.V
   var gh: GatherHalo[F,T,false]
@@ -290,6 +324,7 @@ proc update*[L,F,T](h: Halo[L,F,T], hm: HaloMap[L], c: Comm) =
   toc("gather")
 
 proc updateRev*[L,F,T](h: Halo[L,F,T], hm: HaloMap[L], c: Comm) =
+  bind copy
   tic("Halo updateRev")
   let elemSize = sizeof(T) div L.V
   var gh: GatherHalo[F,T,true]
@@ -346,6 +381,7 @@ proc neighbor*(h: Halo, i: SomeInteger, mu: SomeInteger, fb: SomeInteger): int32
     h.layout.neighborBck[mu][i]
 
 when isMainModule:
+  import qex
   qexInit()
   tic("main")
   var defaultLat = @[4,4,4,4]
@@ -480,9 +516,7 @@ when isMainModule:
     #gf.gaugeForce3(g)
     toc "gaugeForce"
     for mu in 0..<nd:
-      for e in st[mu]:
-        let s = g[mu][e] * st[mu][e].adj
-        st[mu][e].projectTAH s
+      contractProjectTAH(st[mu], g[mu], st[mu])
       echo gf[mu].norm2, " ", st[mu].norm2, " ", (gf[mu]-st[mu]).norm2
   testStaple()
 
@@ -500,4 +534,3 @@ when isMainModule:
 # [1,-1,0,0],[0,-1,1,0],[0,-1,0,1],
 # [1,0,-1,0],[0,1,-1,0],[0,0,-1,1],
 # [1,0,0,-1],[0,1,0,-1],[0,0,1,-1]
-

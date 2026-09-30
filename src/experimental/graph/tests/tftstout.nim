@@ -2,12 +2,15 @@
 ## Check graph gradients against ndiff, the small-rho log-Jacobian, and rho=0.
 
 import qex, algorithms/numdiff, maths/groupOps
+import helpers
 import ../[core, scalar, gauge]
 import ../functional
-import ../hmcgauge/ftstout
+import ../hmcgauge/[ftstout, flow]
 
-proc runFtStoutTests*(lat: seq[int]; beta, rho: float; nsmear = 1) =
+proc runFtStoutTests*(localLat: seq[int]; beta, rho: float; nsmear = 1) =
   qexInit()
+  letParam:
+    lat = latticeFromLocalLattice(localLat, nRanks)
   const eps = 1e-3
   let seed = 1234567891'u
   let
@@ -46,7 +49,7 @@ proc runFtStoutTests*(lat: seq[int]; beta, rho: float; nsmear = 1) =
       yv = y.eval.sval
       rel = abs(xv - yv)/(1.0 + abs(yv))
     echo "E[", name, "]: x=", xv, " ref=", yv, " rel=", rel
-    if rel > tol: inc nfail
+    if not (rel <= tol): inc nfail
 
   proc checkNodeGrad(name: string, f, t: Gscalar, x0: float) =
     let ana = f.grad(t).eval.sval
@@ -109,6 +112,25 @@ proc runFtStoutTests*(lat: seq[int]; beta, rho: float; nsmear = 1) =
     doAssert ld.isStaticZeroLeaf
     checkScalarEq("stoutAction zero sweep", seff, plain)
 
+  block:
+    var calls = 0
+    let common = flowAction(gc, proc(V: Ggauge): Ggauge =
+      inc calls
+      V)
+    let Vg = gauge.toGvalue(grt, V0)
+    doAssert calls == 0
+    doAssert common.flow(Vg).nodeKey == Vg.nodeKey
+    let effective = common.action(Vg)
+    doAssert common.flow(Vg).nodeKey == Vg.nodeKey
+    doAssert calls == 1
+    checkScalarEq("identity flow action", effective, gaugeAction(gc, Vg))
+    Vg.update Aconst
+    checkScalarEq("cached flow input update", effective, gaugeAction(gc, Ag))
+    doAssert common.flow(Vg).nodeKey == Vg.nodeKey
+    doAssert calls == 1
+    doAssert common.flow(Ag).nodeKey == Ag.nodeKey
+    doAssert calls == 2
+
   proc checkGrad(name: string, build: proc(Vt: Ggauge): Gscalar) =
     ## Perturb V along a random algebra direction R via V(t)=exp(t R)V0 and compare
     ## the graph gradient d/dt with the numerical derivative of the forward.
@@ -130,7 +152,7 @@ proc runFtStoutTests*(lat: seq[int]; beta, rho: float; nsmear = 1) =
     gt.update 0.0
     let rel = abs((nd - ana) / (abs(nd) + abs(ana) + 1e-30))
     echo "A[", name, "]: ana=", ana, " num=", nd, " +/- ", err, " rel=", rel
-    if rel >= 1e-6: inc nfail
+    if not (rel < 1e-6): inc nfail
 
   checkGrad("ax_xgauge", proc(Vt: Ggauge): Gscalar =
     # x = projTAH(ds Vt†) depends on Vt: isolates expDeriv (Nc=1 fix guard)
@@ -161,7 +183,7 @@ proc runFtStoutTests*(lat: seq[int]; beta, rho: float; nsmear = 1) =
     a.update rho
     let rel = abs((nd - ana) / (abs(nd) + abs(ana) + 1e-30))
     echo "A[", name, "]: ana=", ana, " num=", nd, " +/- ", err, " rel=", rel
-    if rel >= 1e-6: inc nfail
+    if not (rel < 1e-6): inc nfail
 
   checkAlphaGrad("lndet_rho", proc(a: Gscalar): Gscalar =
     let Vg = gauge.toGvalue(grt, V0)
@@ -372,15 +394,13 @@ proc runFtStoutTests*(lat: seq[int]; beta, rho: float; nsmear = 1) =
     checkGaugeEq("stoutActionStep update-only W grad", dWuf, dWur)
     checkGaugeEq("stoutActionStep log-only W grad", dWlf, dWlr)
     checkScalarEq("stoutActionStep log-only alpha grad", dalf, dalr)
-    var coeffRejected = false
-    try:
-      discard grad(ff, c1)
-    except GraphValueError:
-      coeffRejected = true
-    doAssert coeffRejected
+    let dcf = grad(ff,c1)
+    checkScalarEq("stoutActionStep coefficient gradient",redot(dcf,c1),a*daf)
+    doAssert dcf.cval.rect == 0 and dcf.cval.pgm == 0 and dcf.cval.adjplaq == 0
     W.update(Aconst)
     up.update(V0)
     a.update(0.8*rho)
+    checkScalarEq("stoutActionStep coefficient refresh",redot(dcf,c1),a*daf)
     checkGaugeEq(
       "stoutActionStep update refresh", fused.Wnew, reference.Wnew)
     checkScalarEq(
@@ -472,12 +492,12 @@ proc runFtStoutTests*(lat: seq[int]; beta, rho: float; nsmear = 1) =
         when nc == 1:
           s += simdSum(ln(1.0 + M[0, 0].re))
         elif nc == 3:
-          s += simdSum(expProjMulLogJac(M[]))
+          s += simdSum(expProjMulLogJac(M[], scale=expProjectTAHScale))
       s.threadRankSum
       threadSingle: exact = s
     let got = lj.eval.sval
     echo "E[stoutLogDetJ value]: x=", got, " ref=", exact
-    if abs(got - exact) > 1e-12*(1.0 + abs(exact)): inc nfail
+    if not (abs(got - exact) <= 1e-12*(1.0 + abs(exact))): inc nfail
 
     var
       Rw = lo.newgauge
@@ -563,18 +583,21 @@ proc runFtStoutTests*(lat: seq[int]; beta, rho: float; nsmear = 1) =
   # --- B. log-Jacobian forward leading order at small rho --------------------
   block:
     let smallRho = 1e-4
-    # Leading order of ln det f' for the canonical projTAH(W ds†) direction:
-    # U(1) → +rho*redot(V,ds); SU(N) → +rho*(N^2-1)/N*redot(V,ds) (trace part of dF).
+    # ln det f'(rho) = a1*rho + a2*rho^2 + O(rho^3) for the canonical projTAH(W ds†)
+    # direction, a1 = redot(V,ds) for U(1) and (N^2-1)/N*redot(V,ds) for SU(N)
+    # (trace part of dF).  For random V, a1 ~ sqrt(volume) and a2 ~ volume, so
+    # compare the odd part (ln det f'(rho) - ln det f'(-rho))/2 = a1*rho + O(rho^3).
     const linCoef = when nc == 1: 1.0 else: float(nc*nc - 1) / float(nc)
+    let V0g = gauge.toGvalue(grt, V0)
+    proc lndet(r: float): float =
+      logDetJ(smearFlow(V0g, c1, scalar.toGvalue(grt, r), 1), V0g).eval.sval
     let
-      V0g = gauge.toGvalue(grt, V0)
-      u = smearFlow(V0g, c1, scalar.toGvalue(grt, smallRho), 1)
       lin = scalar.toGvalue(grt, linCoef*smallRho) * redot(V0g, gaugeActionDeriv(c1, V0g))
-      lndetVal = logDetJ(u, V0g).eval.sval
+      lndetVal = 0.5*(lndet(smallRho) - lndet(-smallRho))
       linVal = lin.eval.sval
     let rel = abs((lndetVal - linVal) / (abs(lndetVal) + abs(linVal) + 1e-30))
-    echo "B lndet: actual=", lndetVal, " linear=", linVal, " rel=", rel
-    doAssert rel < 1e-2
+    echo "B lndet odd part: actual=", lndetVal, " linear=", linVal, " rel=", rel
+    doAssert rel < 1e-4
 
   # --- C. rho = 0 identity baseline ------------------------------------------
   block:
@@ -635,4 +658,4 @@ proc runFtStoutTests*(lat: seq[int]; beta, rho: float; nsmear = 1) =
   qexFinalize()
 
 when isMainModule:
-  runFtStoutTests(@[4, 4, 4, 4], 6.0, 0.02)
+  runFtStoutTests(@[4, 4, 8, 8], 6.0, 0.02)

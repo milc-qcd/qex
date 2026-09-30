@@ -1,6 +1,7 @@
 import ../[core, scalar, multi]
 import ../support/op
 import layout, physics/qcdTypes
+import gauge/gaugeUtils
 import types, basic_ops, matfun
 
 # Section: Fused Gauge Ops
@@ -26,7 +27,7 @@ proc axpygf(v: Gvalue) =
   let z = Ggauge(v)
   z.mapGaugeSites(a.sval * x.gval[mu] + y.gval[mu])
 
-let axpyg = Gfunc(forward: axpygf, backward: axpygb, name: "axpy")
+let axpyg = Gfunc(bufferMode: bmFull, forward: axpygf, backward: axpygb, name: "axpy")
 
 proc axpy*(a: Gscalar, x, y: Ggauge): Ggauge =
   ## Fused `a*x + y`, evaluated in one whole-gauge pass.
@@ -47,7 +48,7 @@ proc adjmulggf(v: Gvalue) =
   let z = Ggauge(v)
   z.mapGaugeSites(x.gval[mu].adj * y.gval[mu])
 
-let adjmulgg = Gfunc(forward: adjmulggf, backward: adjmulggb, name: "g.adj*g")
+let adjmulgg = Gfunc(bufferMode: bmFull, forward: adjmulggf, backward: adjmulggb, name: "g.adj*g")
 
 proc adjmul*(x: Ggauge, y: Ggauge): Ggauge =
   graphNode(sameShapeGaugeNodeLike(x, y, "g.adj*g"), @[Gvalue(x), Gvalue(y)], adjmulgg, "g.adj*g")
@@ -67,7 +68,7 @@ proc muladjggf(v: Gvalue) =
   let z = Ggauge(v)
   z.mapGaugeSites(x.gval[mu] * y.gval[mu].adj)
 
-let muladjgg = Gfunc(forward: muladjggf, backward: muladjggb, name: "g*g.adj")
+let muladjgg = Gfunc(bufferMode: bmFull, forward: muladjggf, backward: muladjggb, name: "g*g.adj")
 
 proc muladj*(x: Ggauge, y: Ggauge): Ggauge =
   graphNode(sameShapeGaugeNodeLike(x, y, "g*g.adj"), @[Gvalue(x), Gvalue(y)], muladjgg, "g*g.adj")
@@ -93,11 +94,10 @@ proc contractProjTAHPackedInputf(v: Gvalue) =
   let x = Ggauge(args.storedSlot(0))
   let y = Ggauge(args.storedSlot(1))
   let z = Ggauge(v)
-  z.mapGaugeElements:
-    let s = x.gval[mu][e] * y.gval[mu][e].adj
-    z.gval[mu][e].projectTAH s
+  threads:
+    contractProjectTAH(z.gval, x.gval, y.gval)
 
-let contractProjTAHPackedInputg = Gfunc(
+let contractProjTAHPackedInputg = Gfunc(bufferMode: bmFull,
   forward: contractProjTAHPackedInputf,
   backward: contractProjTAHPackedInputb,
   name: "contractProjTAH packed")
@@ -115,14 +115,11 @@ proc contractProjTAHSumInputf(v: Gvalue) =
     y = Ggauge(v.inputs[1])
     z = Ggauge(v)
   z.mapGaugeElements:
-    var x {.noinit.}: evalType(y.gval[mu][e])
-    x := Ggauge(v.inputs[2]).gval[mu][e]
-    for i in 3..<v.inputs.len:
-      x += Ggauge(v.inputs[i]).gval[mu][e]
+    let x = gaugeTermSum(v.inputs.len-2,i,Ggauge(v.inputs[2+i]).gval[mu][e])
     let s = x * y.gval[mu][e].adj
     z.gval[mu][e].projectTAH s
 
-let contractProjTAHSumInputg = Gfunc(
+let contractProjTAHSumInputg = Gfunc(bufferMode: bmFull,
   forward: contractProjTAHSumInputf,
   backward: contractProjTAHPackedInputb,
   inputView: contractProjTAHSumInputView,
@@ -153,10 +150,7 @@ proc contractProjTAH*(x: Ggauge, y: Ggauge, parity = -1, dir = 0): Ggauge =
         y = Ggauge(v.inputs[1])
         z = Ggauge(v)
       forGaugeSubset(sub):
-        var x {.noinit.}: evalType(y.gval[dir][e])
-        x := Ggauge(v.inputs[2]).gval[dir][e]
-        for i in 3..<v.inputs.len:
-          x += Ggauge(v.inputs[i]).gval[dir][e]
+        let x = gaugeTermSum(v.inputs.len-2,i,Ggauge(v.inputs[2+i]).gval[dir][e])
         let s = x * y.gval[dir][e].adj
         z.gval[dir][e].projectTAH s
     proc sumb(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
@@ -170,19 +164,17 @@ proc contractProjTAH*(x: Ggauge, y: Ggauge, parity = -1, dir = 0): Ggauge =
       multiValues("contractProjTAH subset input gradients", proj * y, proj.adjmul x)
     result = graphNode(
       x.gaugeNodeLike, inputs,
-      Gfunc(forward: sumf, backward: sumb, inputView: contractProjTAHSumInputView,
+      Gfunc(bufferMode: bmZero, forward: sumf, backward: sumb, inputView: contractProjTAHSumInputView,
             name: "contractProjTAH packed"),
       "contractProjTAH packed")
-    result.zeroGaugeStorage
     return
   proc fwd(v: Gvalue) =
     let args = Gmulti(v.inputs[0])
     let x = Ggauge(args.storedSlot(0))
     let y = Ggauge(args.storedSlot(1))
     let z = Ggauge(v)
-    forGaugeSubset(sub):
-      let s = x.gval[dir][e] * y.gval[dir][e].adj
-      z.gval[dir][e].projectTAH s
+    threads:
+      contractProjectTAH(z.gval[dir], x.gval[dir], y.gval[dir], sub)
   proc bwd(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
     let args = Gmulti(z.inputs[0])
     let
@@ -194,9 +186,8 @@ proc contractProjTAH*(x: Ggauge, y: Ggauge, parity = -1, dir = 0): Ggauge =
     multiValues("contractProjTAH subset input gradients", proj * y, proj.adjmul x)
   result = graphNode(
     x.gaugeNodeLike, @[Gvalue(args)],
-    Gfunc(forward: fwd, backward: bwd, name: "contractProjTAH packed"),
+    Gfunc(bufferMode: bmZero, forward: fwd, backward: bwd, name: "contractProjTAH packed"),
     "contractProjTAH packed")
-  result.zeroGaugeStorage
 
 proc axexpPackedInputb(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
   let args = Gmulti(z.inputs[0])
@@ -218,11 +209,10 @@ proc axexpPackedInputf(v: Gvalue) =
   let a = Gscalar(args.storedSlot(0))
   let x = Ggauge(args.storedSlot(1))
   let z = Ggauge(v)
-  let f = a.sval
-  z.mapGaugeElements:
-    z.gval[mu][e] := exp(f * x.gval[mu][e])
+  threads:
+    axexp(z.gval, a.sval, x.gval)
 
-let axexpPackedInputg = Gfunc(
+let axexpPackedInputg = Gfunc(bufferMode: bmFull,
   forward: axexpPackedInputf,
   backward: axexpPackedInputb,
   name: "axexp packed")
@@ -264,16 +254,10 @@ proc axexpmulyPackedInputPackf(v: Gvalue) =
   # Result slots: [exp(a*x), exp(a*x)*y]
   let expax = Ggauge(pack.storedSlot(0))
   let value = Ggauge(pack.storedSlot(1))
-  let f = a.sval
   threads:
-    for mu in 0..<value.gval.len:
-      for e in value.gval[mu]:
-        var t{.noinit.}: evalType(x.gval[mu][e])
-        t[] := expAH(f * x.gval[mu][e][])
-        expax.gval[mu][e] := t
-        value.gval[mu][e] := t * y.gval[mu][e]
+    axexpmuly(value.gval, a.sval, x.gval, y.gval, expax.gval)
 
-let axexpmulyPackedInputPackg = Gfunc(
+let axexpmulyPackedInputPackg = Gfunc(bufferMode: bmFull,
   forward: axexpmulyPackedInputPackf,
   backward: axexpmulyPackedInputPackb,
   name: "axexpmulyPack packed")
@@ -298,12 +282,8 @@ proc axexpmuly*(a: Gscalar, x: Ggauge, y: Ggauge, parity = -1, dir = 0): Ggauge 
     let pack = Gmulti(v)
     let expax = Ggauge(pack.storedSlot(0))
     let value = Ggauge(pack.storedSlot(1))
-    let f = a.sval
-    forGaugeSubset(sub):
-      var t{.noinit.}: evalType(x.gval[dir][e])
-      t[] := expAH(f * x.gval[dir][e][])
-      expax.gval[dir][e] := t
-      value.gval[dir][e] := t * y.gval[dir][e]
+    threads:
+      axexpmuly(value.gval[dir], a.sval, x.gval[dir], y.gval[dir], sub, expax.gval[dir])
   proc bwd(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
     let args = Gmulti(z.inputs[0])
     let a = Gscalar(args[0])
@@ -322,8 +302,6 @@ proc axexpmuly*(a: Gscalar, x: Ggauge, y: Ggauge, parity = -1, dir = 0): Ggauge 
       resultExpax.adjmul upstreamValue)
   let pack = newMultiOutputNode(
     @[Gvalue(x), Gvalue(x)], @[Gvalue(args)],
-    Gfunc(forward: fwd, backward: bwd, name: "axexpmulyPack packed"),
+    Gfunc(bufferMode: bmZero, forward: fwd, backward: bwd, name: "axexpmulyPack packed"),
     "axexpmulyPack packed")
-  Ggauge(pack[0]).zeroGaugeStorage     # off-subset stays zero across evals
-  Ggauge(pack[1]).zeroGaugeStorage
   Ggauge(pack[1])

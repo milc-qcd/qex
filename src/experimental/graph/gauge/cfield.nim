@@ -8,6 +8,7 @@
 import ../[core, scalar]
 import ../support/op
 import layout, gauge, physics/qcdTypes
+import field/matrixFields
 import types, basic_ops
 
 proc trace*(x: Gfield): Gcfield
@@ -18,8 +19,7 @@ proc cfieldNodeLike(x: Gfield): Gcfield =
   when cfieldIsGfield:
     x.fieldNodeLike
   else:
-    let f = x.fval.l.newField(ColorMatrixN[1, DComplexV])
-    f.zeroFieldStorage
+    let f = x.fval.l.newShape(ColorMatrixN[1, DComplexV])
     Gcfield(runtime: x.runtime, fval: f).assignStableNodeId
 
 proc traceb(zb: Gvalue, z: Gvalue, i: int, input: Gvalue): Gvalue =
@@ -30,10 +30,9 @@ proc tracef(v: Gvalue) =
   let x = Gfield(v.inputs[0])
   let z = Gcfield(v)
   threads:
-    for e in z.fval:
-      z.fval[e][0,0] := x.fval[e].trace
+    siteTrace(z.fval, x.fval)
 
-let traceg = Gfunc(forward: tracef, backward: traceb, name: "trace")
+let traceg = Gfunc(bufferMode: bmFull, forward: tracef, backward: traceb, name: "trace")
 
 proc trace*(x: Gfield): Gcfield =
   ## Per-site trace as a complex scalar field.
@@ -52,10 +51,9 @@ proc scalef(v: Gvalue) =
   let x = Gfield(v.inputs[1])
   let z = Gfield(v)
   threads:
-    for e in z.fval:
-      z.fval[e] := c.fval[e][0,0] * x.fval[e]
+    scale(z.fval, c.fval, x.fval)
 
-let scaleg = Gfunc(forward: scalef, backward: scaleb, name: "scale")
+let scaleg = Gfunc(bufferMode: bmFull, inplace: @[1], forward: scalef, backward: scaleb, name: "scale")
 
 proc scale*(c: Gcfield, x: Gfield): Gfield =
   ## Per-site complex scalar times matrix.
@@ -76,10 +74,9 @@ proc dotf(v: Gvalue) =
   let y = Gfield(v.inputs[1])
   let z = Gcfield(v)
   threads:
-    for e in z.fval:
-      z.fval[e][0,0] := dot(x.fval[e], y.fval[e])
+    siteDot(z.fval, x.fval, y.fval)
 
-let dotg = Gfunc(forward: dotf, backward: dotb, name: "dot")
+let dotg = Gfunc(bufferMode: bmFull, forward: dotf, backward: dotb, name: "dot")
 
 proc dot*(x, y: Gfield): Gcfield =
   ## Per-site tr(x^dag y) as a complex scalar field.
