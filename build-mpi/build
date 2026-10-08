@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HERE=${BASH_SOURCE[0]%/*}
+cd "$HERE"
+source /work2/11599/mdai07/stampede3/milc-qex/load-mpi-env.sh
+exec make ARGS="${ARGS:---parallelBuild:4}" "$@"

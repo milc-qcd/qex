@@ -1,0 +1,8 @@
+# Generated executables and compiler cache.
+/bin/
+/nimcache/
+
+# Local backup copies.
+*.bak
+*.bak-*
+/uvfix-backup-*/
