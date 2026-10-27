@@ -121,6 +121,11 @@ proc hisqStag[U](u: U): auto =
   return newStag3(su, sul)
 
 proc stagLap4D[U, S, F](g: U; stag: S; psi_in: F; mass: float): F =
+  # Massless HISQ Laplacian: -sum_mu D_mu^dagger D_mu, without
+  # the mixed-direction terms in the square of the full Dirac operator.
+  doAssert mass == 0.0, "HISQ fermion flow requires zero flow mass"
+  doAssert g.len == 4 and stag.g.len == 8,
+    "HISQ flow requires one-link and Naik terms from newStag3"
   let lo = psi_in.l
   var v1 = lo.ColorVector()
   var v2 = lo.ColorVector()
@@ -129,11 +134,16 @@ proc stagLap4D[U, S, F](g: U; stag: S; psi_in: F; mass: float): F =
     v1 := 0
     v2 := 0
     v3 := 0
-  g.rephase()
-  stag.D(v1, psi_in, mass)
-  stag.Ddag(v2, v1, mass)
-  g.rephase()
-  v3 := -v2
+  # hisqStag already supplies phased, coefficient-weighted HISQ links.
+  # Keep the thin gauge g unphased and unchanged for gauge evolution.
+  for mu in 0..<4:
+    let dmu = stag.subdirs(@[2*mu, 2*mu + 1])
+    threads:
+      dmu.D(v1, psi_in, 0.0)
+      threadBarrier()
+      dmu.Ddag(v2, v1, 0.0)
+      threadBarrier()
+      v3 -= v2
   return v3
 
 template staggeredFlow(
