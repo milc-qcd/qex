@@ -1,6 +1,6 @@
 import qex
 #import examples/[hisqhmc_h]
-import hisqflowutils #hisqtestutils
+import stagflowutils
 import json
 
 import gauge/[gaugefix, hisqsmear]

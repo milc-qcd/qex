@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+BACKEND=${1:-SYCL}
+TARGET=${2:-check_hisq_gpu}
+SYCL_TARGET=${SYCL_TARGET:-generic}
+case "$BACKEND" in CPU|SYCL) ;; *) echo "Backend must be CPU or SYCL" >&2; exit 2;; esac
+case "$SYCL_TARGET" in generic|h100|a100) ;; *) echo "SYCL_TARGET must be generic, h100 or a100" >&2; exit 2;; esac
+case "$TARGET" in
+  check_cuda_device) SOURCE="$ROOT/tests/backend/check_cuda_device.cpp" ;;
+  hisqflow) SOURCE="$ROOT/src/alphas/hisqflow.nim" ;;
+  *) SOURCE="$ROOT/tests/backend/$TARGET.nim" ;;
+esac
+BUILD_ROOT=${QEX_BUILD_ROOT:-$ROOT/build-sycl}
+BUILD="$BUILD_ROOT/$BACKEND"
+EXTRA_FLAGS=()
+if [[ "$BACKEND" == SYCL && "$SYCL_TARGET" != generic ]]; then
+  BUILD="$BUILD_ROOT/SYCL-$SYCL_TARGET"
+  case "$SYCL_TARGET" in h100) CUDA_ARCH=sm_90 ;; a100) CUDA_ARCH=sm_80 ;; esac
+  CUDA_TOOLKIT=${CUDA_PATH:-${CUDA_HOME:-}}
+  if [[ -z "$CUDA_TOOLKIT" ]]; then
+    echo "NVIDIA GPU builds require CUDA_PATH (or CUDA_HOME) and a SYCL compiler/runtime with the NVIDIA CUDA backend." >&2
+    exit 2
+  fi
+  if [[ ! -f "$CUDA_TOOLKIT/include/cuda.h" || ! -d "$CUDA_TOOLKIT/nvvm/libdevice" ]]; then
+    echo "CUDA toolkit headers or nvvm/libdevice are missing under: $CUDA_TOOLKIT" >&2
+    exit 2
+  fi
+  # Nim passes these through to the C++ compiler at compile AND link time.
+  CUDA_FLAGS="-fsycl-targets=nvptx64-nvidia-cuda -Xsycl-target-backend=nvptx64-nvidia-cuda --cuda-gpu-arch=$CUDA_ARCH"
+  EXTRA_FLAGS+=("--passC:$CUDA_FLAGS" "--passL:$CUDA_FLAGS")
+  # Preserve shell quoting in the compiler command Nim constructs.
+  printf -v CUDA_OPTION '%q' "--cuda-path=$CUDA_TOOLKIT"
+  EXTRA_FLAGS+=("--passC:$CUDA_OPTION" "--passL:$CUDA_OPTION")
+fi
+mkdir -p "$BUILD"
+if [[ "$TARGET" == check_cuda_device ]]; then
+  if [[ "$BACKEND" != SYCL ]]; then
+    echo "check_cuda_device requires Backend=SYCL" >&2; exit 2
+  fi
+  # Enumeration only: the smoke/physics binaries exercise the target kernels.
+  exec "${SYCL_CXX:-icpx}" -std=c++17 -fsycl "$SOURCE" -o "$BUILD/$TARGET"
+fi
+export VLEN=${VLEN:-8}
+# Select the same SYCL compiler through Intel MPI, Open MPI or MPICH wrappers.
+export I_MPI_CXX=${I_MPI_CXX:-${SYCL_CXX:-icpx}}
+export OMPI_CXX=${OMPI_CXX:-${SYCL_CXX:-icpx}}
+export MPICH_CXX=${MPICH_CXX:-${SYCL_CXX:-icpx}}
+exec "${NIM:-nim}" cpp --cc:clang \
+  --clang.cpp.exe:"${CXX:-mpicxx}" --clang.cpp.linkerexe:"${CXX:-mpicxx}" \
+  --parallelBuild:"${BUILD_JOBS:-2}" --mm:refc --threads:on --tlsEmulation:off \
+  -d:release --assertions:on \
+  --path:"$ROOT/src" --path:"$ROOT/src/alphas" \
+  -d:qmpDir:"${QMP_DIR:-$ROOT/deps-mpi/qmp}" \
+  -d:qioDir:"${QIO_DIR:-$ROOT/deps-mpi/qio}" \
+  -d:Backend="$BACKEND" -d:hisqFlowGpu \
+  --nimcache:"$BUILD/nimcache-$TARGET" --out:"$BUILD/$TARGET" \
+  "${EXTRA_FLAGS[@]}" "$SOURCE"

@@ -1,7 +1,7 @@
 # QEX configuration file
 
 # location of temporary build files (generated C/C++ source, objects, etc.)
-nimcache = "/work2/11599/mdai07/stampede3/milc-qex/build-mpi/nimcache"
+nimcache = "/work2/11599/mdai07/stampede3/qex-gpu-sycl/build-mpi/nimcache"
 
 # Nim compiler build verbosity (0-3, 1 is Nim default)
 buildVerbosity = 1
@@ -55,8 +55,8 @@ simd = ""
 vlen = 8
 
 # required libraries
-qmpDir = "/work2/11599/mdai07/stampede3/milc-qex/deps-mpi/qmp"
-qioDir = "/work2/11599/mdai07/stampede3/milc-qex/deps-mpi/qio"
+qmpDir = "/work2/11599/mdai07/stampede3/qex-gpu-sycl/deps-mpi/qmp"
+qioDir = "/work2/11599/mdai07/stampede3/qex-gpu-sycl/deps-mpi/qio"
 
 # optional libraries
 qudaDir = ""

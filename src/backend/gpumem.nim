@@ -136,7 +136,9 @@ proc freeGpuMem*(cpuPtr: pointer) =
   mixin gpuFree
   var x: GpuMem
   if gpuMemTable.pop(cpuPtr, x):
-    gpuFree(x.p)
+    # Flag-only entries have no allocation (notably shared-memory fields).
+    if x.p != nil:
+      gpuFree(x.p)
 
 proc getGpuMem*(cpuPtr: pointer): ptr GpuMem =
   result = addr gpuMemTable[cpuPtr]
@@ -144,7 +146,7 @@ proc getGpuMem*(cpuPtr: pointer): ptr GpuMem =
   #echo result[]
 
 proc getGpuMemDef(cpuPtr: pointer): ptr GpuMem =
-  result = addr gpuMemTable.mgetOrPut(cpuPtr)
+  result = addr gpuMemTable.mgetOrPut(cpuPtr, GpuMem())
   if gmValidFlags notin result.flags:
     result.flags = defaultFlags
 

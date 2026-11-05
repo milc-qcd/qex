@@ -32,3 +32,7 @@ Build guide: [BUILD.md](BUILD.md)
 
 Further examples:
 - [tests/examples](tests/examples)
+
+Directional HISQ flow with SYCL: [build, execution scope and validation](docs/HISQ_SYCL.md).
+
+Perlmutter A100 target: [MPI build setup and GPU validation job](docs/PERLMUTTER_SYCL.md).

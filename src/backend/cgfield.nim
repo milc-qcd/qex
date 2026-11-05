@@ -20,6 +20,8 @@ type
   SomeGpuField2* = GpuField2 | GpuFieldExpr2
 template n*(x: GpuField): auto = x.d.n
 template p*(x: GpuField): auto = x.d.p
+template `n=`*(x: var GpuField, value: int) = x.d.n = value
+template `p=`*(x: var GpuField, value: auto) = x.d.p = value
 template gpuSites*(x: GpuField): auto = gpuSites(x.n, x.V)
 proc gpuFlagsExcl*(x: Field, f: set[gmFlags]) =
   gpuMemFlagsExcl(addr x[0], f)

@@ -3,6 +3,9 @@ import gauge
 import gauge/[gaugeUtils, hisqsmear]
 import physics/[stagSolve]
 import json, sequtils, strutils
+when defined(hisqFlowGpu):
+  import hisqflowgpu
+  export hisqflowgpu
 
 proc rephase[U](u: seq[U]) =
   threads:
@@ -146,13 +149,14 @@ proc stagLap4D[U, S, F](g: U; stag: S; psi_in: F; mass: float): F =
       v3 -= v2
   return v3
 
-template staggeredFlow(
+template staggeredFlowImpl(
     gc: GaugeActionCoeffs;
     g: auto; #array|seq;
     phi0: auto; #array|seq;
     steps: int;
     eps: float;
     M: seq[float];
+    useGpu: static bool;
     measure: untyped;
   ): untyped =
   #[ Gradient flow w/ Wilson or rectangle action
@@ -185,6 +189,17 @@ template staggeredFlow(
     const ncorners = phi0[0][0].len
     const nmasses = phi0[0][0][0].len
     let lo = g[0].l
+    when useGpu:
+      let gpuFlow = newHisqFlowGpu(g, phi0[0][0][0][0])
+      defer: gpuFlow.free()
+    template flowLaplacian(stag, src, mass: untyped): untyped =
+      when useGpu:
+        gpuFlow.laplacian(src, mass)
+      else:
+        stagLap4D(g, stag, src, mass)
+    template prepareFlowLinks(stag: untyped) =
+      when useGpu:
+        gpuFlow.updateLinks(stag)
     var n = 1
     # echo "phi0[0][0][0][0].norm2: ", phi0[0][0][0][0].norm2 # print the first element of the first propagator as a sanity check to make sure the flow is actually doing something to the propagators
     while true:
@@ -211,12 +226,13 @@ template staggeredFlow(
                 phi1[color][srct][corner][mass] = lo.ColorVector()
         block:
           let stag = hisqStag(g) # use hisqStag(g) for hisq, newStag(g) for ordinary staggeref fermions
+          prepareFlowLinks(stag)
           gc.gaugeForce(g, f)
           for color in 0..<nci:
             for srct in 0..<nsrcTime:
               for corner in 0..<ncorners:
                 for mass in 0..<nmasses:
-                  d0p0[color][srct][corner][mass] := eps*stagLap4D(g, stag, phi0[
+                  d0p0[color][srct][corner][mass] := eps*flowLaplacian(stag, phi0[
                       color][srct][corner][mass], M[mass]) #Delta0
                   threads:
                     phi1[color][srct][corner][mass] := phi0[color][srct][corner][
@@ -234,12 +250,13 @@ template staggeredFlow(
               g[mu][e] := t # W1
         #fermion flow step 1: d1p1 = eps*laplace4D[g,phi1] #Delta1
         block:
-          let stag1 = hisqStag(g) # use hisqStag(g) for hisq, newStag(g) for ordinary staggeref fermions, don't need newStag
+          let stag1 = hisqStag(g) # HISQ links at W1
+          prepareFlowLinks(stag1)
           for color in 0..<nci:
             for srct in 0..<nsrcTime:
               for corner in 0..<ncorners:
                 for mass in 0..<nmasses:
-                  d1p1[color][srct][corner][mass] := eps*stagLap4D(g, stag1, phi1[
+                  d1p1[color][srct][corner][mass] := eps*flowLaplacian(stag1, phi1[
                       color][srct][corner][mass], M[mass]) #Delta1
         echo "d1p1[0][0][0][0].norm2: ", d1p1[0][0][0][0].norm2 # print the first element of the first d1p1 as a sanity check to make sure the flow is actually doing something to the propagators
         gc.gaugeForce(g, f) # f is now -dS/dU at U = W1
@@ -254,13 +271,14 @@ template staggeredFlow(
         #fermion flow step 2&3: d2p2 = epsnc*laplace4D[g,phi2] #Delta2
         block:
           let stag2 = hisqStag(g)
+          prepareFlowLinks(stag2)
           for color in 0..<nci:
             for srct in 0..<nsrcTime:
               for corner in 0..<ncorners:
                 for mass in 0..<nmasses:
                   var phi2 = newOneOf(phi0[color][srct][corner][mass])
                   phi2 := phi0[color][srct][corner][mass] + 8.0/9.0*d1p1[color][srct][corner][mass] - 2.0/9.0*d0p0[color][srct][corner][mass]
-                  phi0[color][srct][corner][mass] := phi1[color][srct][corner][mass] + 3.0/4.0 * eps*stagLap4D(g, stag2, phi2, M[mass]) #3.0/4.0 * d2p2
+                  phi0[color][srct][corner][mass] := phi1[color][srct][corner][mass] + 3.0/4.0 * eps*flowLaplacian(stag2, phi2, M[mass]) #3.0/4.0 * d2p2
         echo "phi0[0][0][0][0].norm2: ", phi0[0][0][0][0].norm2 # print the first element of the first phi2 as a sanity check to make sure the flow is actually doing something to the propagators
         gc.gaugeForce(g, f) # f is now -dS/dU at U = W2
         threads:
@@ -286,7 +304,7 @@ template staggeredFlow(
     M: seq[float];
     measure: untyped
   ): untyped =
-  gc.staggeredFlow(g, phi, 0, eps, M):
+  gc.staggeredFlowImpl(g, phi, 0, eps, M, defined(hisqFlowGpu)):
     let flowTime {.inject.} = wflowT
     measure
 

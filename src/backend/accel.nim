@@ -25,6 +25,8 @@ template `[]`*(x: GpuSeq, i: auto): auto =
   #doAssert(i>=0)
   #doAssert(i<x.n)
   x.p[i]
+template `[]=`*(x: GpuSeq, i: auto, value: auto) =
+  x.p[i] = value
 
 proc displayName*(x: typedesc[SomeNumber]): string =
   $x
@@ -46,6 +48,9 @@ proc toGpu*[T](x: seq[T]): auto =
   g
 
 template getGpu*(x: seq, g: GpuSeq): auto = g
+
+proc fromGpu*[T:SomeNumber](x: var seq[T], g: GpuSeq[T], pgm: ptr GpuMem) =
+  pgm.copyOut(addr x[0])
 
 proc fromGpu*(x: var seq, g: GpuSeq) =
   #when backendIsGpu:

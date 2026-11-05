@@ -160,8 +160,10 @@ proc makeHaloMap*[L](hl: HaloLayout[L], c: Comm, offsets: seq[seq[int32]]): Halo
       for k in 0 ..< vlen:
         var y = x + vecOffset[k]
         for l in 0..<nd:
-          if y[l] < 0: y[l] += int32 hl.lo.physGeom[l]
-          if y[l] >= hl.lo.physGeom[l]: y[l] -= int32 hl.lo.physGeom[l]
+          # A Naik halo can extend by more than one global period on a
+          # tiny lattice. Normalize fully rather than wrapping just once.
+          let extent = int32 hl.lo.physGeom[l]
+          y[l] = ((y[l] mod extent) + extent) mod extent
         let ri = hl.lo.rankIndex(y)
         let didx = vlen*(i-hl.nOut)+k
         rl.add RecvList(didx: int32 didx, srank: int32 ri.rank, sidx: int32 ri.index)

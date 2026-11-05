@@ -190,6 +190,7 @@ proc reverse*(gm: GatherMap): GatherMap =
 
 # TODO: startRecvs, startSends, doLocal, wait
 proc gather*(c: Comm; gm: GatherMap; data: auto) =
+  mixin copy
   tic("gather")
   # start recvs
   let elemsize = data.elemsize

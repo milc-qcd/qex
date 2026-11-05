@@ -1,3 +1,12 @@
 *~
 /bin/
 nimcache/
+
+# Isolated SYCL build products
+/build-sycl/
+
+/deps-perlmutter/
+
+# Local MPI dependency installs and generated build logs
+/deps-mpi/
+/build-mpi/stagflow-build.log

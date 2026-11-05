@@ -99,8 +99,8 @@ proc device*(q: Queue): Device {.importcpp:"#.get_device()".}
 proc getNdItem1*(): Nd1 {.importcpp:"sycl::ext::oneapi::this_work_item::get_nd_item<1>()",constructor.}
 proc getWorkGroup1*(): WorkGroup1 {.importcpp:"sycl::ext::oneapi::this_work_item::get_work_group<1>()".}
 
-proc getGlobalId1*(): csize_t {.importcpp:"sycl::ext::oneapi::this_work_item::get_nd_item<1>().get_global_id(0)".}
-proc getGlobalRange1*(): csize_t {.importcpp:"sycl::ext::oneapi::this_work_item::get_nd_item<1>().get_global_range(0)".}
+proc getGlobalId1*(): csize_t {.importcpp:"sycl::ext::oneapi::experimental::this_item<1>().get_id(0)".}
+proc getGlobalRange1*(): csize_t {.importcpp:"sycl::ext::oneapi::experimental::this_item<1>().get_range(0)".}
 
 proc getGroup*(): Group {.importc:"sycl::ext::oneapi::this_work_item::get_work_group<1>",syclh.}
 proc getSubgroup*(): SubGroup {.importc:"sycl::ext::oneapi::this_work_item::get_sub_group",syclh.}
