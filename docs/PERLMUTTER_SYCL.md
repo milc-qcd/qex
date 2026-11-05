@@ -6,11 +6,12 @@ lists four NVIDIA A100 GPUs per Perlmutter GPU node, with 40 GB or 80 GB per
 GPU depending on the node type. Build the kernels for **`sm_80`**, using
 `SYCL_TARGET=a100`. The H100 profile remains `sm_90`.
 
-This remains the hybrid implementation described in [HISQ_SYCL.md](HISQ_SYCL.md):
-the directional fat/Naik Laplacian runs on SYCL, while smearing, gauge evolution,
-RK vector combinations, inversion, measurements and MPI halo packing run on
-CPU. The current halo layout has unused edge/corner storage; small-lattice
-validation does not establish a production lattice's memory fit or speedup.
+The resident flow implementation is described in [HISQ_SYCL.md](HISQ_SYCL.md).
+Gauge force/update, HISQ smearing, directional fermion flow, RK combinations
+and halo packing run on the selected SYCL device. MPI uses compact host-staged
+messages. Inversion, measurements and I/O remain on CPU; a snapshot is downloaded
+after each complete flow step. The workspace and rectangular halos retain
+substantial storage; validate memory fit and throughput on the intended lattice.
 
 ## Compiler and runtime
 
@@ -72,6 +73,9 @@ MPI_CC=cc ./scripts/build-flow-mpi-deps.sh
 ./scripts/build-hisq-sycl.sh SYCL check_cuda_device
 ./scripts/build-hisq-sycl.sh SYCL check_sycl_smoke
 ./scripts/build-hisq-sycl.sh SYCL check_hisq_gpu
+./scripts/build-hisq-sycl.sh SYCL check_gaugeflow_gpu
+./scripts/build-hisq-sycl.sh SYCL check_device_halo
+./scripts/build-hisq-sycl.sh SYCL check_gpu_mem
 ./scripts/build-hisq-sycl.sh SYCL hisqflow
 ```
 
@@ -111,7 +115,19 @@ This is a single-node validation job. Production multi-node decomposition,
 MPI scaling, memory use, full application I/O and timings remain to be tested.
 The full application retains its existing JSON and command-line interface.
 
-## Validation status, November 5, 2026
+## Resident-flow build status
+
+The full application, including gauge force/update, HISQ smearing and fermion
+RK kernels, cross-compiled and linked for `sm_80` on Stampede3. The device-math
+smoke test also builds for `sm_80`. The one- and two-rank numerical suite passed
+on the SYCL OpenCL CPU device; see [the recorded results](HISQ_SYCL.md#resident-gauge-and-fermion-flow-validation-november-5-2026).
+This does not replace rebuilding against Perlmutter's MPI and validating on
+its A100 devices. No Perlmutter access or job submission has been attempted.
+
+## Earlier validation at checkpoint `c949ada`
+
+The results below predate resident gauge/smearing/RK offload. See
+[HISQ_SYCL.md](HISQ_SYCL.md) for the updated flow validation.
 
 - The A100 (`sm_80`) smoke test, physics test and full `hisqflow` application
   compiled and linked successfully on Stampede3 using Intel oneAPI 2024.0,

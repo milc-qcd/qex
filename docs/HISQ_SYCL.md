@@ -4,54 +4,60 @@ This checkout is an independent copy of `milc-qex` at commit
 `26b3941234dc7332ff28d100ed71516976e025a6`, including the local changes present
 when it was copied. Development is on branch `hisq-flow-sycl`.
 
-The native accelerator implementation is in `src/alphas/hisqflowgpu.nim`.
-Build with `-d:hisqFlowGpu` to use it in `src/alphas/hisqflow.nim`.
-Without that define, the application uses its existing CPU Laplacian.
-`-d:Backend=SYCL` selects SYCL; `Backend=CPU` exercises the accelerator's
-host fallback for debugging.
+Build with `-d:hisqFlowGpu` to select the resident accelerator flow in
+`src/alphas/hisqflow.nim`. `-d:Backend=SYCL` selects SYCL; `Backend=CPU`
+runs the same kernels through QEX's CPU backend. Without `hisqFlowGpu`, the
+application retains the original CPU flow implementation.
 
-## Implemented behavior
+## Execution and source guide
 
-The offloaded operator is exactly the massless directional HISQ Laplacian:
+The coupled RK3 integrator now keeps the gauge field, all fermion sources,
+and stage temporaries on the selected device. Each of its three stages runs:
 
-```
-L psi = -sum_mu D_mu^dagger D_mu psi = sum_mu D_mu D_mu psi
-D_mu psi(x) = 1/2 [F_mu(x) psi(x+mu) - F_mu^dagger(x-mu) psi(x-mu)
-                 +N_mu(x) psi(x+3mu) - N_mu^dagger(x-3mu) psi(x-3mu)]
-```
+1. Staggered phases and antiperiodic temporal boundary signs on thin links.
+2. First Fat7 smearing, U(3) projection, and second Fat7/Lepage plus Naik links.
+3. The massless directional HISQ Laplacian and fermion RK vector combinations.
+4. Wilson/rectangle gauge force, traceless antihermitian projection, and the
+   matrix exponential gauge update.
 
-The input is the eight interleaved, phased, coefficient-weighted fat/Naik link
-fields from `newStag3`. No additional staggered phases or Naik factors are
-applied. This is not the square of the full Dirac operator: there are no
-mixed-direction products.
+The flow operator is `sum_mu D_mu(D_mu psi) = -sum_mu D_mu^dagger D_mu psi`.
+There are no mixed-direction terms. Fat and Naik links are interleaved, with
+one-half multiplying the forward-minus-backward stencil. Thin links stay
+unphased. Smearing uses the same `newHisq(0,1)` coefficients and phase convention
+as the CPU reference. Nonzero flow mass and gauge actions containing adjoint
+plaquette or parallelogram terms are rejected.
 
-A reusable workspace owns its fields, halo maps and device allocations.
-It copies new links once per RK stage, applies each direction twice, and
-accumulates the four squares on the device. It exchanges the intermediate
-fermion halo between applications. Each hop uses a three-layer halo; the
-squared operator is not fused into a six-hop kernel. Workspace-owned fields
-avoid changing the caller's memory flags, and explicit cleanup releases the
-workspace's device allocations.
+| Source | Responsibility |
+| --- | --- |
+| `src/alphas/flowstepgpu.nim` | Persistent fields and the three coupled RK stages |
+| `src/alphas/gaugeflowgpu.nim` | Gauge force/update and two-level HISQ smearing |
+| `src/alphas/hisqflowgpu.nim` | Directional stencil and resident Laplacian |
+| `src/comms/halodevice.nim` | Device halo packing, local copies and compact MPI messages |
+| `src/alphas/hisqflowutils.nim` | Select CPU or accelerator flow; invoke existing measurements |
 
-The production RK integrator invokes this operator at W0, W1 and W2. The
-thin gauge remains unphased for gauge evolution, and nonzero flow mass is
-rejected. The operator returns workspace-owned host-visible output; copy it
-before invoking the operator again.
+Halo exchanges copy local neighbors on device and transfer only packed remote
+boundary values through host memory for QMP/MPI. This does not require GPU-aware
+MPI. Exchanges and kernels are synchronous; communication overlap is future
+work. Explicit cleanup releases workspace allocations. Captured sequences
+share stable storage, and GPU metadata stays valid when its allocation table
+grows during nested conversions.
 
-## Current execution split
+The matrix exponential specializes QEX's existing order-four expm1 algorithm
+with 20 scaling/squaring steps. Its numerical algorithm is unchanged; selecting
+it explicitly avoids inlining unused runtime branches into the device kernel.
 
-This is a hybrid CPU/SYCL implementation. The directional stencil and its
-accumulation run on the selected SYCL device. HISQ smearing, gauge force,
-gauge updates, RK vector combinations, inversion, measurements and MPI halo
-gathers still run on the host. The intermediate fermion field is downloaded
-for host halo gathering; its device copy is retained for the second kernel.
-The final Laplacian is downloaded for the existing flow integrator.
+Inversion, measurement reductions and file I/O remain on CPU. At the end of
+each complete flow step, the integrator downloads one snapshot for the existing
+measurement interface. No full-field download is needed between RK stages or
+between the two applications of a directional operator. The standalone
+`directional`/`laplacian` convenience methods still accept host fields and
+return host-visible workspace storage; `laplacianInto` is the resident API.
 
-No GPU performance claim follows from this implementation. The three-layer
-rectangular halo representation also allocates unused corner/edge storage;
-its memory cost must be reduced before large production lattices. Further
-work includes device halo packing/exchange, GPU smearing and gauge evolution,
-resident RK vectors and GPU measurements.
+This is a correctness-oriented implementation. Explicit path products repeat
+some matrix multiplications, and rectangular halos reserve unused edge/corner
+storage. Several full gauge and per-source RK work fields are retained. Measure
+memory use and throughput on the intended decomposition before production;
+small-lattice correctness checks establish neither memory fit nor speedup.
 
 ## Build
 
@@ -62,6 +68,9 @@ and their MPI runtime. The copied Stampede3 configuration can be used with:
 source ./load-mpi-env.sh
 ./scripts/build-hisq-sycl.sh SYCL check_sycl_smoke
 ./scripts/build-hisq-sycl.sh SYCL check_hisq_gpu
+./scripts/build-hisq-sycl.sh SYCL check_gaugeflow_gpu
+./scripts/build-hisq-sycl.sh SYCL check_device_halo
+./scripts/build-hisq-sycl.sh SYCL check_gpu_mem
 ./scripts/build-hisq-sycl.sh SYCL hisqflow
 ```
 
@@ -151,7 +160,7 @@ GPU both ranks share it, which does not validate communication between GPUs.
 The validation script's shared-memory MPI defaults apply only to one node;
 production multi-node launching must follow the target cluster's setup.
 
-### Stampede3 H100 build and launch status
+### Stampede3 H100 build and launch status at checkpoint `c949ada`
 
 The H100 smoke test, physics test and full `hisqflow` application have all
 compiled and linked successfully for `sm_90`, using the existing Intel oneAPI
@@ -163,6 +172,9 @@ export CUDA_PATH=/home1/apps/nvidia/Linux_x86_64/24.5/cuda
 export SYCL_TARGET=h100
 ./scripts/build-hisq-sycl.sh SYCL check_sycl_smoke
 ./scripts/build-hisq-sycl.sh SYCL check_hisq_gpu
+./scripts/build-hisq-sycl.sh SYCL check_gaugeflow_gpu
+./scripts/build-hisq-sycl.sh SYCL check_device_halo
+./scripts/build-hisq-sycl.sh SYCL check_gpu_mem
 ./scripts/build-hisq-sycl.sh SYCL hisqflow
 ```
 
@@ -217,6 +229,13 @@ its reference. It checks:
 - source/link updates using the same workspace;
 - all three color propagators and gauge fields after two coupled RK steps.
 
+`check_gaugeflow_gpu.nim` independently compares Wilson and rectangle forces,
+all eight fat/Naik links, and each of the three gauge RK updates with the CPU
+reference. `check_device_halo.nim` compares local and remote boundary values
+with QEX's host gather. `check_gpu_mem.nim` checks metadata pointer stability
+across table growth. `check_hisq_gpu -rectangle:1` repeats the coupled test with
+a rectangle action. Floating-point checks explicitly reject nonfinite results.
+
 Comparisons use FP64 and relative tolerance `1e-11`. A source-level CPU
 fallback check is available with `./scripts/build-hisq-sycl.sh CPU check_hisq_gpu`.
 
@@ -242,7 +261,51 @@ that reference and checks Naik halos on a 2×4×4×8 lattice with two ranks. Thi
 also covers a hop longer than a global lattice extent. The halo mapper now
 normalizes coordinates modulo the full extent, including repeated wraps.
 
-### Recorded validation, November 5, 2026
+### Resident gauge and fermion flow validation, November 5, 2026
+
+The complete `scripts/check-hisq-sycl.sh` suite passed with Nim 2.0.17,
+Intel oneAPI 2024.0, Intel MPI 2021.11, VLEN=8 and FP64. SYCL ran on the
+Intel OpenCL CPU device (Xeon Platinum 8468), with two host threads and two
+OpenCL compute units. These results validate device allocations and kernels,
+but do not establish NVIDIA hardware correctness or performance.
+
+| Check | Result |
+| --- | --- |
+| Optimized CPU fallback, two coupled RK steps | Passed; fermion error at most 3.57e-15 |
+| SYCL Wilson flow, one and two MPI ranks | Passed; coupled fermion error at most 2.35e-15; gauge error below 2.74e-16 |
+| SYCL rectangle flow, two coupled steps | Passed; fermion error below 7.87e-16 |
+| Wilson/rectangle forces, one and two ranks | Passed; error below 3.09e-16 |
+| All eight fat/Naik links, one and two ranks | Passed; error below 3.98e-13 |
+| Each gauge RK stage, both actions, one and two ranks | Passed; error below 1.94e-16 |
+| Packed halo exchange, narrow two-rank domains | Passed against host gather |
+| Analytic repeated-wrap Naik halo | Passed; error 2.90e-16 |
+| Imported device math and metadata-table growth | Passed |
+| Workspace cleanup | No GPU allocations or metadata entries remain after cleanup |
+| Generic SYCL full application | Compiled and linked |
+| A100 sm_80 math smoke test and full application | Cross-compiled and linked on Stampede3; not executed on A100 |
+| Original CPU-only application | Nim C generation passed without `hisqFlowGpu` |
+
+Numerical logs are under `build-sycl/validation/`. Application build logs are
+`build-sycl/resident-generic-app-build.log`, `resident-a100-app-build.log`,
+and `resident-original-cpu-app.log`. The CPU fallback additionally passed with
+one host thread and with the rectangle action. Scalar matrix helpers are
+expanded inside CPU kernels as they are for device kernels; the optimized
+CPU checks cover this path as well as the original CPU reference.
+
+Backend fixes preserve imported math calls during Nim inlining, route the
+projection's FP64 functions through SYCL's device math for NVIDIA, and keep
+allocation metadata and captured sequence storage stable. Rebuild all
+validation binaries before using the H100 or Perlmutter job scripts. The
+older NVIDIA binaries from the checkpoint below cover only the earlier port.
+
+No H100/A100 kernel execution, Perlmutter MPI integration, production lattice
+memory validation, or GPU timing has been performed. The full application's
+inversion/configuration-I/O/measurement workflow has not been run end to end.
+
+### Earlier directional-only validation at checkpoint `c949ada`
+
+These results predate the resident gauge/smearing/RK implementation above.
+Recorded November 5, 2026.
 
 Environment: Nim 2.0.17, Intel oneAPI 2024.0, Intel MPI 2021.11, VLEN=8,
 FP64, two OpenMP threads per rank. SYCL selected Intel OpenCL CPU devices

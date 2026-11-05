@@ -50,14 +50,47 @@ template gpuNumThreads*: auto =
   #item.getRange
   int getGlobalRange1()
 
+# Use SYCL math entry points so NVIDIA FP64 operations resolve through its
+# device library, rather than unsupported LLVM scalar sin/cos instructions.
+proc syclSqrt[T: SomeFloat](x: T): T {.importcpp: "sycl::sqrt(@)", header: "<sycl/sycl.hpp>".}
+proc syclSin[T: SomeFloat](x: T): T {.importcpp: "sycl::sin(@)", header: "<sycl/sycl.hpp>".}
+proc syclCos[T: SomeFloat](x: T): T {.importcpp: "sycl::cos(@)", header: "<sycl/sycl.hpp>".}
+proc syclAcos[T: SomeFloat](x: T): T {.importcpp: "sycl::acos(@)", header: "<sycl/sycl.hpp>".}
+
+macro useSyclMath(body: typed): untyped =
+  proc rewrite(n: NimNode): NimNode =
+    if n.kind == nnkTypeOfExpr: return n.copyNimTree
+    if n.kind in CallNodes and n[0].kind == nnkSym:
+      let impl = n[0].getImpl
+      var foreignName = ""
+      if impl.len > 4 and impl[4].kind == nnkPragma:
+        for pragma in impl[4]:
+          if pragma.kind == nnkExprColonExpr and pragma[0].eqIdent("importc"):
+            foreignName = pragma[1].strVal
+      var replacement: NimNode
+      case foreignName
+      of "sqrt", "sqrtf": replacement = bindSym"syclSqrt"
+      of "sin", "sinf": replacement = bindSym"syclSin"
+      of "cos", "cosf": replacement = bindSym"syclCos"
+      of "acos", "acosf": replacement = bindSym"syclAcos"
+      else: discard
+      if replacement != nil:
+        result = newCall(replacement)
+        for i in 1..<n.len: result.add rewrite(n[i])
+        return
+    result = n.copyNimNode
+    for child in n: result.add rewrite(child)
+  result = rebuild rewrite(body)
+
 template syclDefs(body: untyped) =
   setupSycl()
   #var item {.item1.}: Item1
   #template getThreadNum: auto {.used.} = item[]
   #template getNumThreads: auto {.used.} = item.getRange
   #{.emit:["#define nimZeroMem(b,len) memset((b),0,(len))"].}
-  inlineProcs:
-    body
+  useSyclMath:
+    inlineProcs:
+      body
   #{.emit:["#undef nimZeroMem"].}
 
 proc genCpuPrepare(n:seq[NimNode]):NimNode =

@@ -1,6 +1,6 @@
 ## Native accelerator implementation of the directional, massless HISQ Laplacian.
-## Link smearing and MPI halo gathers currently run on the host. Kernels operate
-## on device fields; the intermediate is downloaded for its halo exchange.
+## Device-resident stencil with device halo packing and host-staged MPI.
+## Only compact boundary messages cross host memory during an application.
 ##
 ## Mathematical operation (mu is one of the four spacetime directions):
 ##   D_mu psi(x) = 1/2 [F_mu(x) psi(x+mu) - F_mu(x-mu)^dagger psi(x-mu)
@@ -43,14 +43,14 @@ import qex
 # Accelerator dispatch/memory flags plus Field <-> GpuField conversion.
 import backend/[accel, cgfield]
 # Host halo construction/gathering plus device halo types and neighbor indexing.
-import comms/[halo, halogpu]
+import comms/[halo, halogpu, halodevice]
 
 # Expose these adapters to modules instantiating the generic procedures below.
-export accel, cgfield, halo, halogpu
+export accel, cgfield, halo, halogpu, halodevice
 
 # Reusable workspace. Generic types are: halo layout, halo map, gauge halo,
-# fermion halo, and ordinary fermion field, respectively.
-type HisqFlowGpu*[HL, HM, GH, FH, F] = ref object
+# fermion halo, ordinary fermion field, and fermion/gauge exchange plans.
+type HisqFlowGpu*[HL, HM, GH, FH, F, E, GE] = ref object
   # Shared geometry and neighbor-index tables for local sites plus halos.
   layout: HL
   # Eight host gather plans: one backward-link halo for each fat/Naik field.
@@ -63,10 +63,14 @@ type HisqFlowGpu*[HL, HM, GH, FH, F] = ref object
   links: seq[GH]
   # Source psi and scratch D_mu psi, each with a separate neighbor buffer.
   source, intermediate: FH
-  # Device accumulator, downloaded at the end and reused on subsequent calls.
+  # Device accumulator for the host-input convenience API.
   output: F
   # Initially false: no links have been loaded, and the workspace is not freed.
   linksReady, closed: bool
+  # Persistent device packing plans and compact MPI send/receive buffers.
+  sourceExchange: E
+  directionExchanges: seq[E]
+  linkExchanges: seq[GE]
 
 # Construct storage and communication plans. g supplies a gauge-field type;
 # psi supplies the fermion type/layout. Actual link values are loaded later.
@@ -87,7 +91,9 @@ proc newHisqFlowGpu*(g: auto, psi: auto): auto =
   # Infer the corresponding fermion halo type, also without runtime allocation.
   type FH = typeof(makeHalo(hl, psi))
   # Declare a reference with all five workspace type parameters fixed.
-  var w: HisqFlowGpu[typeof(hl), HM, GH, FH, typeof(psi)]
+  type E = typeof(newDeviceHaloExchange(default(FH), default(HM)))
+  type GE = typeof(newDeviceHaloExchange(default(GH), default(HM)))
+  var w: HisqFlowGpu[typeof(hl), HM, GH, FH, typeof(psi), E, GE]
   # Allocate the workspace object; fields start at their default values.
   new w
   # Keep the shared halo geometry for all subsequent applications.
@@ -140,18 +146,23 @@ proc newHisqFlowGpu*(g: auto, psi: auto): auto =
     w.directionMaps[mu] = hl.makeHaloMap(comm, directionOffsets)
   # Finish the source plan with all sixteen displacements (four per mu).
   w.fermionMap = hl.makeHaloMap(comm, offsets)
+  w.sourceExchange = newDeviceHaloExchange(w.source, w.fermionMap)
+  for hm in w.directionMaps:
+    w.directionExchanges.add newDeviceHaloExchange(w.intermediate, hm)
+  for k in 0..<8:
+    w.linkExchanges.add newDeviceHaloExchange(w.links[k], w.linkMaps[k])
   # These fields are owned by the workspace: changing their flags cannot
   # invalidate the caller's CPU fields or another solver's device storage.
   # Source interior is read-only on device. Disable repeated CPU uploads;
   # loadSource will explicitly mark each new source with gmCpuWriteOnce.
   w.source.field.gpuFlagsExcl {gmGpuWrite, gmCpuWrite}
-  # Give the source HALO the same read-only/pending-upload policy.
+  # Source halo is filled on device by sourceExchange before each application.
   w.source.gpuFlagsExcl {gmGpuWrite, gmCpuWrite}
   # The intermediate interior is produced on device, never overwritten on CPU.
-  # Keep gmCpuRead enabled so each newly computed intermediate is downloaded.
+  # The resident policy below disables full-field downloads for halo exchange.
   w.intermediate.field.gpuFlagsExcl {gmCpuWrite}
-  # The intermediate HALO is filled on CPU and only read on device. Each
-  # completed host gather will explicitly request its next upload.
+  # Intermediate halos are written by device exchange and read by the stencil.
+  # exchange explicitly enables gmGpuWrite for its packing/copy kernels.
   w.intermediate.gpuFlagsExcl {gmGpuWrite, gmCpuWrite}
   # Keep the accumulating output on device: no upload of old host contents,
   # and no automatic download until downloadOutput temporarily enables it.
@@ -162,33 +173,30 @@ proc newHisqFlowGpu*(g: auto, psi: auto): auto =
     link.field.gpuFlagsExcl {gmGpuWrite, gmCpuWrite}
     # Apply the same policy separately to this link's halo buffer.
     link.gpuFlagsExcl {gmGpuWrite, gmCpuWrite}
+  # Every local buffer now stays resident, including D_mu psi. Halo exchange
+  # downloads only the compact send buffer, not the intermediate field.
+  for f in [w.source.field, w.intermediate.field, w.output]: f.resident()
+  for link in w.links: link.field.resident()
   # Return the new workspace through Nim's implicit result variable.
   result = w
 
 # Copy fresh, already smeared/phased links into the workspace. Call again
 # whenever the RK stage changes the gauge links; this routine does no smearing.
 proc updateLinks*(w: HisqFlowGpu, links: auto) =
-  # Reject reuse after device-storage cleanup.
-  doAssert not w.closed
-  # Require four fat fields and four Naik fields in the expected ordering.
-  doAssert links.len == 8, "Expected interleaved fat/Naik links from newStag3"
-  # Use QEX's current communicator for host halo exchanges between ranks.
-  let comm = getDefaultComm()
-  # Refresh every fat/Naik direction.
+  ## Host-input compatibility API; copy, upload once, then exchange on device.
+  doAssert not w.closed and links.len == 8
   for k in 0..<8:
-    # Use QEX CPU threading to share the following local field copy among host threads.
-    threads:
-      # Copy matrix values into the owned local field; this does not alias links[k].
-      w.links[k].field := links[k]
-    # Gather backward neighbor matrices into the host halo before launching kernels.
-    w.links[k].update(w.linkMaps[k], comm)
-    # Re-upload once after every RK stage's link rebuild. In particular, do
-    # not retain the example's immutable-link assumption across flow stages.
-    # Mark the changed local links for one upload at their next device use.
-    w.links[k].field.gpuFlagsIncl {gmCpuWriteOnce}
-    # Independently mark the refreshed halo matrices for one upload.
-    w.links[k].gpuFlagsIncl {gmCpuWriteOnce}
-  # Allow directional/laplacian calls now that links have been supplied.
+    threads: w.links[k].field := links[k]
+    w.links[k].field.hostUpdated()
+    w.linkExchanges[k].exchange(w.links[k])
+  w.linksReady = true
+
+proc updateDeviceLinks*(w: HisqFlowGpu, links: auto) =
+  ## Accept already resident GPU HISQ links without a host download/re-upload.
+  doAssert not w.closed and links.len == 8
+  for k in 0..<8:
+    deviceCopy(w.links[k].field, links[k])
+    w.linkExchanges[k].exchange(w.links[k])
   w.linksReady = true
 
 # Convenience overload accepting QEX's staggered-operator object.
@@ -197,7 +205,7 @@ proc updateLinks*(w: HisqFlowGpu, stag: Staggered) =
   w.updateLinks(stag.g)
 
 # Private kernel wrapper: compute dst = D_mu src, or dst += D_mu src when
-# accumulate is true. src must have the required host halo ready beforehand.
+# accumulate is true. src must have the required device halo ready beforehand.
 proc applyDirection(w: HisqFlowGpu, dst: auto, src: auto,
                     mu: int, accumulate: bool) =
   # Use the destination's lattice layout to size the kernel launch.
@@ -254,18 +262,12 @@ proc applyDirection(w: HisqFlowGpu, dst: auto, src: auto,
 
 # Prepare a fresh caller-supplied fermion source in owned host storage.
 proc loadSource(w: HisqFlowGpu, src: auto) =
-  # Use QEX CPU threading to share the following local field copy among host threads.
-  threads:
-    # Copy this rank's source values; leave the caller's field and GPU flags alone.
-    w.source.field := src
-  # Gather all +/-1 and +/-3 source neighbors on the host, including MPI data.
-  w.source.update(w.fermionMap, getDefaultComm())
-  # Request one upload of the new local source at its next kernel use.
-  w.source.field.gpuFlagsIncl {gmCpuWriteOnce}
-  # Request one upload of its refreshed halo, separately from the local field.
-  w.source.gpuFlagsIncl {gmCpuWriteOnce}
+  ## Host-input API: callers do not need to manage device flags themselves.
+  threads: w.source.field := src
+  w.source.field.hostUpdated()
+  w.sourceExchange.exchange(w.source)
 
-# Make the completed accumulator available to the existing CPU flow integrator.
+# Make the convenience API accumulator available to CPU callers.
 proc downloadOutput(w: HisqFlowGpu) =
   # Temporarily enable the CPU-read half of the device-to-host copy condition.
   w.output.gpuFlagsIncl {gmCpuRead}
@@ -281,7 +283,7 @@ proc directional*(w: HisqFlowGpu, src: auto, mu: int): auto =
   doAssert not w.closed and w.linksReady
   # Reject an invalid direction before indexing the link/map sequences.
   doAssert mu >= 0 and mu < 4
-  # Copy the new source and gather its host halo; device upload is still deferred.
+  # Copy/upload the new source and exchange its boundary values on device.
   w.loadSource(src)
   # Compute just D_mu src, overwriting any previous output.
   w.applyDirection(w.output, w.source, mu, false)
@@ -290,39 +292,29 @@ proc directional*(w: HisqFlowGpu, src: auto, mu: int): auto =
   # Return the owned output field itself, not a newly allocated copy.
   w.output
 
-# Public directional Laplacian used by fermion flow: four directions,
-# two D_mu applications per direction, hence eight stencil launches.
-proc laplacian*(w: HisqFlowGpu, src: auto, mass = 0.0): auto =
-  ## -sum_mu D_mu^dagger D_mu = sum_mu D_mu D_mu, since each massless
-  ## directional operator is anti-Hermitian. Never square the full D here.
-  ## Result aliases workspace storage; copy it before the next application.
-  # Require a live workspace with link values already loaded.
+proc laplacianInto*(w: HisqFlowGpu, dst, src: Field, mass = 0.0) =
+  ## Device-input/device-output API for the RK integrator. dst may alias src:
+  ## the input is preserved in owned scratch before any output is written.
   doAssert not w.closed and w.linksReady
-  # This flow operator contains no mass term; reject a nonzero mass explicitly.
   doAssert mass == 0.0, "HISQ fermion flow requires zero flow mass"
-  # Copy the new source and gather its host halo; device upload is still deferred.
-  w.loadSource(src)
-  # Use QEX's current communicator for host halo exchanges between ranks.
-  let comm = getDefaultComm()
-  # Visit each of the four lattice directions.
+  if (addr src[0]) != (addr w.source.field[0]):
+    deviceCopy(w.source.field, src)
+  w.sourceExchange.exchange(w.source)
   for mu in 0..<4:
-    # First pass: intermediate = D_mu psi. Its gmCpuRead flag causes onGpu
-    # to download the local result after the kernel for the upcoming host gather.
     w.applyDirection(w.intermediate.field, w.source, mu, false)
-    # onGpu has copied the intermediate field back. Gather the ±1/±3
-    # neighbors needed by this direction before the second application.
-    # Fill the intermediate's host halo with D_mu psi at x+/-mu and x+/-3mu.
-    # The device interior stays valid because gathering does not modify it.
-    w.intermediate.update(w.directionMaps[mu], comm)
-    # Upload only the newly gathered intermediate HALO before the next kernel.
-    # Do not mark .field: its current values are already on the device.
-    w.intermediate.gpuFlagsIncl {gmCpuWriteOnce}
-    # Second pass: apply the SAME D_mu to D_mu psi. For mu=0 overwrite output;
-    # for mu=1,2,3 add to it. This gives sum_mu D_mu^2, with no cross directions.
-    w.applyDirection(w.output, w.intermediate, mu, mu != 0)
-  # Download once so the returned ordinary Field can be consumed on CPU.
+    # The first pass stays on device. Pack only the neighbors needed by mu.
+    w.directionExchanges[mu].exchange(w.intermediate)
+    w.applyDirection(dst, w.intermediate, mu, mu != 0)
+
+proc laplacian*(w: HisqFlowGpu, src: auto, mass = 0.0): auto =
+  ## Compatibility API returning host-visible workspace-owned output.
+  ## Flow uses laplacianInto instead so all RK vectors remain on device.
+  doAssert not w.closed and w.linksReady
+  doAssert mass == 0.0, "HISQ fermion flow requires zero flow mass"
+  threads: w.source.field := src
+  w.source.field.hostUpdated()
+  w.laplacianInto(w.output, w.source.field, mass)
   w.downloadOutput()
-  # Return the owned output field itself, not a newly allocated copy.
   w.output
 
 # Explicit cleanup; host fields/maps remain ordinary Nim-managed objects.
@@ -330,6 +322,9 @@ proc free*(w: HisqFlowGpu) =
   ## Release only this workspace's device allocations and metadata.
   # Make repeated cleanup harmless: return immediately if already freed.
   if w.closed: return
+  w.sourceExchange.free()
+  for ex in w.directionExchanges: ex.free()
+  for ex in w.linkExchanges: ex.free()
   # Visit the eight owned link fields and their halo buffers.
   for link in w.links:
     # Use the host field address as the lookup key to release its device allocation

@@ -91,7 +91,9 @@ proc eigs3(e0,e1,e2: var auto; tr,p2,det: auto) {.alwaysInline.} =
   #maxv := 1.0
   #let rsq3r = min(maxv, max(minv,rsq3))
   let isq3 = 1.0/sq3
-  var minv,maxv {.noinit.}: type(isq3)
+  # Infer scalar/SIMD types without local typeof bindings in device inlining.
+  var minv = isq3
+  var maxv = isq3
   maxv := 3e38
   minv := -3e38
   let isq3c = min(maxv, max(minv,isq3))
@@ -157,7 +159,9 @@ proc rsqrtPHM3f(c0,c1,c2:var auto; tr,p2,det:auto) {.alwaysInline.} =
   let l1 = ll + sqs
   let l2 = ll - sqs
   ]#
-  var l0,l1,l2 {.noInit.}: type(tr)
+  var l0 = tr
+  var l1 = tr
+  var l2 = tr
   eigs3(l0,l1,l2, tr,p2,det)
   let sl0 = sqrt(abs(l0))
   let sl1 = sqrt(abs(l1))
@@ -176,7 +180,9 @@ template rsqrtPHM3(r:typed; x:typed) =
   let x2 = x*x
   let p2 = trace(x2).re
   let det = determinant(x).re
-  var c0,c1,c2:type(tr)
+  var c0 = tr
+  var c1 = tr
+  var c2 = tr
   rsqrtPHM3f(c0, c1, c2, tr, p2, det)
   r := c0 + c1*x + c2*x2
   # 2*tr(2) + mm(66) + det(64) + f(60) + 56 = 250

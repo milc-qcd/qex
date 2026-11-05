@@ -4,8 +4,8 @@ import gauge/[gaugeUtils, hisqsmear]
 import physics/[stagSolve]
 import json, sequtils, strutils
 when defined(hisqFlowGpu):
-  import hisqflowgpu
-  export hisqflowgpu
+  import flowstepgpu
+  export flowstepgpu
 
 proc rephase[U](u: seq[U]) =
   threads:
@@ -149,7 +149,7 @@ proc stagLap4D[U, S, F](g: U; stag: S; psi_in: F; mass: float): F =
       v3 -= v2
   return v3
 
-template staggeredFlowImpl(
+template staggeredFlowCpuImpl(
     gc: GaugeActionCoeffs;
     g: auto; #array|seq;
     phi0: auto; #array|seq;
@@ -295,6 +295,36 @@ template staggeredFlowImpl(
       if steps > 0 and n > steps: break
     toc("end")
   flowProc()
+
+template staggeredFlowImpl(
+    gc: GaugeActionCoeffs; g: auto; phi0: auto; steps: int; eps: float;
+    M: seq[float]; useGpu: static bool; measure: untyped) =
+  when useGpu:
+    block:
+      for mass in M:
+        doAssert mass == 0.0, "HISQ fermion flow requires zero flow mass"
+      # Flatten references only; the workspace owns all device evolution data.
+      var sources: seq[typeof(phi0[0][0][0][0])]
+      for color in 0..<phi0.len:
+        for srct in 0..<phi0[color].len:
+          for corner in 0..<phi0[color][srct].len:
+            for mass in 0..<phi0[color][srct][corner].len:
+              sources.add phi0[color][srct][corner][mass]
+      let flowGpu = newCoupledFlowGpu(g, sources, gc)
+      defer: flowGpu.free()
+      var stepNumber = 1
+      while true:
+        flowGpu.step(eps)
+        # Existing measurements require host-visible fields. This is the only
+        # full-field download in the step, and does not dirty device copies.
+        flowGpu.download(g, sources)
+        let wflowT {.inject.} = stepNumber.float * eps
+        measure
+        inc stepNumber
+        if steps > 0 and stepNumber > steps: break
+  else:
+    gc.staggeredFlowCpuImpl(g, phi0, steps, eps, M, false):
+      measure
 
 template staggeredFlow(
     gc: GaugeActionCoeffs;

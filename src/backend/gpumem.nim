@@ -122,7 +122,10 @@ proc copyOut*(x: GpuMem | ptr GpuMem, p: pointer) =
 #  result.bytes = gpuBytes
 #  result.count
 
-var gpuMemTable = newTable[pointer, GpuMem]()
+# Recursive conversions (e.g. a sequence of gauge halos) allocate children
+# while retaining a pointer to the parent metadata. Heap entries keep those
+# pointers valid when inserting children grows and rehashes the table.
+var gpuMemTable = newTable[pointer, ref GpuMem]()
 #var gpuMemNils = newSeq[GpuMem]()
 var gpuMemTag = newSeq[string](0)
 #proc setGpuMemTag*(s: string) =
@@ -134,19 +137,21 @@ proc popGpuMemTag*() =
 
 proc freeGpuMem*(cpuPtr: pointer) =
   mixin gpuFree
-  var x: GpuMem
+  var x: ref GpuMem
   if gpuMemTable.pop(cpuPtr, x):
     # Flag-only entries have no allocation (notably shared-memory fields).
     if x.p != nil:
       gpuFree(x.p)
 
 proc getGpuMem*(cpuPtr: pointer): ptr GpuMem =
-  result = addr gpuMemTable[cpuPtr]
+  result = addr gpuMemTable[cpuPtr][]
   result.touch
   #echo result[]
 
 proc getGpuMemDef(cpuPtr: pointer): ptr GpuMem =
-  result = addr gpuMemTable.mgetOrPut(cpuPtr, GpuMem())
+  if not gpuMemTable.hasKey(cpuPtr):
+    gpuMemTable[cpuPtr] = new(GpuMem)
+  result = addr gpuMemTable[cpuPtr][]
   if gmValidFlags notin result.flags:
     result.flags = defaultFlags
 
@@ -187,7 +192,7 @@ proc dumpGpuMem*(): string =
   var mem = 0
   for v in gpuMemTable.values:
     mem += v.bytes
-    gms.add v
+    gms.add v[]
   gms.sort do (x, y: GpuMem) -> int:
     result = cmp(x.tag.join, y.tag.join)
     if result == 0:

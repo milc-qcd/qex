@@ -39,9 +39,14 @@ if [[ "$SKIP_BUILD" == 0 ]]; then
   "$ROOT/scripts/build-hisq-sycl.sh" CPU check_hisq_gpu > "$LOGS/build-cpu.log" 2>&1
   "$ROOT/scripts/build-hisq-sycl.sh" SYCL check_sycl_smoke > "$LOGS/build-smoke.log" 2>&1
   "$ROOT/scripts/build-hisq-sycl.sh" SYCL check_hisq_gpu > "$LOGS/build-sycl.log" 2>&1
+  for target in check_gpu_mem check_device_halo check_gaugeflow_gpu; do
+    "$ROOT/scripts/build-hisq-sycl.sh" SYCL "$target" > "$LOGS/build-$target.log" 2>&1
+  done
 fi
 for program in "$BUILD_ROOT/CPU/check_hisq_gpu" \
-    "$SYCL_BUILD/check_sycl_smoke" "$SYCL_BUILD/check_hisq_gpu"; do
+    "$SYCL_BUILD/check_sycl_smoke" "$SYCL_BUILD/check_hisq_gpu" \
+    "$SYCL_BUILD/check_gpu_mem" "$SYCL_BUILD/check_device_halo" \
+    "$SYCL_BUILD/check_gaugeflow_gpu"; do
   if [[ ! -x "$program" ]]; then
     echo "Missing validation binary: $program; build it first or use SKIP_BUILD=0." >&2
     exit 1
@@ -50,10 +55,20 @@ done
 "$BUILD_ROOT/CPU/check_hisq_gpu" > "$LOGS/cpu.log" 2>&1
 "$SYCL_BUILD/check_sycl_smoke" > "$LOGS/smoke.log" 2>&1
 "$SYCL_BUILD/check_hisq_gpu" > "$LOGS/sycl.log" 2>&1
+"$SYCL_BUILD/check_hisq_gpu" -rectangle:1 > "$LOGS/rectangle.log" 2>&1
+for target in check_gpu_mem check_device_halo check_gaugeflow_gpu; do
+  "$SYCL_BUILD/$target" > "$LOGS/$target.log" 2>&1
+done
+"${MPIEXEC:-mpiexec}" -n 2 "$SYCL_BUILD/check_device_halo" \
+  -lat:2,4,4,8 > "$LOGS/device-halo-mpi2.log" 2>&1
+"${MPIEXEC:-mpiexec}" -n 2 "$SYCL_BUILD/check_gaugeflow_gpu" \
+  -lat:8,8,8,8 > "$LOGS/gauge-mpi2.log" 2>&1
 "${MPIEXEC:-mpiexec}" -n 2 "$SYCL_BUILD/check_hisq_gpu" \
   -lat:8,8,8,8 > "$LOGS/mpi2.log" 2>&1
 "${MPIEXEC:-mpiexec}" -n 2 "$SYCL_BUILD/check_hisq_gpu" \
   -lat:2,4,4,8 -haloOnly:1 > "$LOGS/narrow.log" 2>&1
 grep -E 'SYCL device:|PASS:' "$LOGS/cpu.log" "$LOGS/smoke.log" \
-  "$LOGS/sycl.log" "$LOGS/mpi2.log" "$LOGS/narrow.log"
+  "$LOGS/sycl.log" "$LOGS/mpi2.log" "$LOGS/narrow.log" \
+  "$LOGS/rectangle.log" "$LOGS/check_gpu_mem.log" "$LOGS/check_device_halo.log" \
+  "$LOGS/check_gaugeflow_gpu.log" "$LOGS/device-halo-mpi2.log" "$LOGS/gauge-mpi2.log"
 echo "Validation logs: $LOGS"

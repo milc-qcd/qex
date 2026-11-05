@@ -1,13 +1,16 @@
 import macros
 import strUtils
 
-proc isMagic(x: NimNode): bool =
-  # echo x.treerepr
-  let pragmas = x[4]
-  if pragmas.kind==nnkPragma and pragmas[0].kind==nnkExprColonExpr and
-     $pragmas[0][0]=="magic": result = true
-
-template isNotMagic(x: NimNode): bool = not isMagic(x)
+proc hasExternalImplementation(x: NimNode): bool =
+  # Foreign routines can have documentation/runnableExamples as their AST
+  # body (Nim 2 std/math sqrt, sin, cos). That body is not executable code.
+  # Preserve the call, and inspect every pragma rather than only the first.
+  if x.len <= 4 or x[4].kind != nnkPragma: return false
+  for pragma in x[4]:
+    let key = if pragma.kind == nnkExprColonExpr: pragma[0] else: pragma
+    if key.kind in {nnkIdent, nnkSym} and
+        key.strVal.toLowerAscii in ["magic", "importc", "importcpp", "importobjc"]:
+      return true
 
 proc getParam(fp: NimNode, n: int): auto =
   # n counts from 1
@@ -646,9 +649,9 @@ proc inlineProcsX(body: NimNode): NimNode =
       # echo "inspecting call"
       # echo it.lisprepr
       # echo procImpl.repr
-      # echo isMagic(procImpl)
+      # echo hasExternalImplementation(procImpl)
       if procImpl.kind == nnkTypeDef: return it.copyNimTree
-      if procImpl.isNotMagic and
+      if not procImpl.hasExternalImplementation and
           procImpl.body.kind!=nnkEmpty and
           procImpl.kind != nnkIteratorDef and
           (procImpl.kind != nnkTemplateDef or $procImpl.params[0] != "typedesc"):

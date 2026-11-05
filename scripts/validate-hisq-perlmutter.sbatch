@@ -25,7 +25,8 @@ mkdir -p "$LOGS"
 export ONEAPI_DEVICE_SELECTOR=cuda:gpu OMP_NUM_THREADS=2
 export OMP_PROC_BIND=close OMP_PLACES=cores
 for program in "$QEX_BUILD_ROOT/CPU/check_hisq_gpu" \
-    "$BUILD/check_cuda_device" "$BUILD/check_sycl_smoke" "$BUILD/check_hisq_gpu"; do
+    "$BUILD/check_cuda_device" "$BUILD/check_sycl_smoke" "$BUILD/check_hisq_gpu" \
+    "$BUILD/check_gpu_mem" "$BUILD/check_device_halo" "$BUILD/check_gaugeflow_gpu"; do
   if [[ ! -x "$program" ]]; then
     echo "Missing $program; build on Perlmutter before submitting." >&2
     exit 1
@@ -43,6 +44,10 @@ run_gpu 4 "$BUILD/check_cuda_device" A100 > "$LOGS/devices.log" 2>&1
 run_gpu 1 "$QEX_BUILD_ROOT/CPU/check_hisq_gpu" > "$LOGS/cpu.log" 2>&1
 run_gpu 4 "$BUILD/check_sycl_smoke" > "$LOGS/smoke.log" 2>&1
 run_gpu 1 "$BUILD/check_hisq_gpu" > "$LOGS/sycl.log" 2>&1
+run_gpu 1 "$BUILD/check_hisq_gpu" -rectangle:1 > "$LOGS/rectangle.log" 2>&1
+run_gpu 1 "$BUILD/check_gpu_mem" > "$LOGS/gpu-mem.log" 2>&1
+run_gpu 2 "$BUILD/check_device_halo" -lat:2,4,4,8 > "$LOGS/device-halo.log" 2>&1
+run_gpu 4 "$BUILD/check_gaugeflow_gpu" -lat:8,8,8,16 > "$LOGS/gauge.log" 2>&1
 # Avoid short outer local extents in the CPU length-three reference shifts.
 run_gpu 4 "$BUILD/check_hisq_gpu" -lat:8,8,8,16 > "$LOGS/mpi4.log" 2>&1
 run_gpu 2 "$BUILD/check_hisq_gpu" -lat:2,4,4,8 -haloOnly:1 > "$LOGS/narrow.log" 2>&1

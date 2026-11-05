@@ -19,6 +19,8 @@ let workspace = newHisqFlowGpu(g, psi)
 proc checkRelative(label: string, error2, reference2: float) =
   let relative = sqrt(error2 / max(reference2, 1e-100))
   echo "CHECK ", label, ": relative error = ", relative
+  # Check IEEE bits as well: optimized floating-point comparisons can accept NaN.
+  doAssert (cast[uint64](relative) and 0x7ff0000000000000'u64) != 0x7ff0000000000000'u64, label
   doAssert relative < 1e-11, label
 
 proc compare(label: string, actual, expected: auto) =
@@ -139,6 +141,7 @@ except AssertionDefect:
 doAssert rejectedMass
 workspace.free()
 workspace.free() # Explicit cleanup is idempotent.
+doAssert dumpGpuMem().startsWith("GpuMem items: 0 "), dumpGpuMem()
 echo "PASS: accelerator HISQ directional Laplacian checks"
 
 # Exercise the very same coupled RK implementation in both execution modes.
@@ -157,18 +160,22 @@ for color in 0..<3:
   threads:
     phiCpu[color][0][0][0].gaussian rngState
     phiGpu[color][0][0][0] := phiCpu[color][0][0][0]
-let gc = GaugeActionCoeffs(plaq: 1.0)
+let gc = if intParam("rectangle", 0) != 0:
+  gaugeActRect(1.2, -1.0/12.0)
+else:
+  GaugeActionCoeffs(plaq: 1.0)
 gc.staggeredFlowImpl(gCpu, phiCpu, 2, 0.01, @[0.0], false):
   discard
 gc.staggeredFlowImpl(gGpu, phiGpu, 2, 0.01, @[0.0], true):
   discard
-for color in 0..<3:
-  compare("two coupled RK steps, color " & $color,
-    phiGpu[color][0][0][0], phiCpu[color][0][0][0])
 var gaugeDifference = lo.newGauge()
 threads:
   for mu in 0..<4:
     gaugeDifference[mu] := gGpu[mu] - gCpu[mu]
 checkRelative("coupled gauge evolution", gaugeDifference.norm2, gCpu.norm2)
+for color in 0..<3:
+  compare("two coupled RK steps, color " & $color,
+    phiGpu[color][0][0][0], phiCpu[color][0][0][0])
+doAssert dumpGpuMem().startsWith("GpuMem items: 0 "), dumpGpuMem()
 echo "PASS: coupled HISQ flow CPU/accelerator checks"
 qexFinalize()
