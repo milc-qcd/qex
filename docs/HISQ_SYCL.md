@@ -247,7 +247,8 @@ I_MPI_FABRICS=shm OMP_NUM_THREADS=2 CL_CONFIG_CPU_MAX_COMPUTE_UNITS=2 \
 ```
 
 `I_MPI_FABRICS=shm` is for these local checks, not for a multi-node job.
-GPU hardware validation and GPU performance measurements remain required.
+NVIDIA hardware validation and controlled GPU performance measurements remain required.
+The full configuration comparison on Intel GPUs is recorded below.
 
 Run the reproducible single-host suite with `./scripts/check-hisq-sycl.sh`.
 Its default selector is `opencl:cpu`; set `ONEAPI_DEVICE_SELECTOR` to the target
@@ -298,9 +299,14 @@ allocation metadata and captured sequence storage stable. Rebuild all
 validation binaries before using the H100 or Perlmutter job scripts. The
 older NVIDIA binaries from the checkpoint below cover only the earlier port.
 
-No H100/A100 kernel execution, Perlmutter MPI integration, production lattice
-memory validation, or GPU timing has been performed. The full application's
-inversion/configuration-I/O/measurement workflow has not been run end to end.
+The full application subsequently passed an end-to-end **32³×48 configuration
+1000 comparison on Intel Max 1550 GPUs**, job `3685973`. All 10,280 saved values
+agreed with the old CPU output: gauge relative L2 error `6.15e-15`, correlator
+relative L2 error `8.54e-15`. The application took 313.36 s, versus 690.87 s for
+the saved ICX CPU run; the hardware differs. See [the complete validation
+record](CONFIG1000_VALIDATION.md) for tolerances, channel errors, placement,
+artifacts and reproduction. H100/A100 kernel execution, Perlmutter MPI
+integration and memory fit on its GPU decomposition remain untested.
 
 ### Earlier directional-only validation at checkpoint `c949ada`
 

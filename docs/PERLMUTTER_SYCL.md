@@ -12,6 +12,9 @@ and halo packing run on the selected SYCL device. MPI uses compact host-staged
 messages. Inversion, measurements and I/O remain on CPU; a snapshot is downloaded
 after each complete flow step. The workspace and rectangular halos retain
 substantial storage; validate memory fit and throughput on the intended lattice.
+The full 0.15 fm configuration 1000 passed on Stampede3 Intel Max 1550 GPUs;
+see [the comparison record](CONFIG1000_VALIDATION.md). That result does not
+establish A100 execution or Perlmutter MPI compatibility.
 
 ## Compiler and runtime
 
@@ -64,7 +67,7 @@ Stampede3 libraries. Copy the existing source archives along with the code:
 `deps-mpi/qmp-2.5.4.tar.gz` and `deps-mpi/qio-3.0.0.tar.gz` (or set
 `QMP_TARBALL` and `QIO_TARBALL` to their locations). These source archives
 are currently untracked files in the copied working tree; a plain Git clone
-will not include them or this uncommitted port.
+will not include those archives. The flow implementation is committed.
 
 ```bash
 # Same environment as above; cc must be the Cray MPI C wrapper.

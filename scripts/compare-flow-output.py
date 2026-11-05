@@ -107,7 +107,7 @@ def main():
     args.report.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     with args.csv.open("w", newline="") as stream:
         if summaries:
-            writer = csv.DictWriter(stream, fieldnames=list(summaries[0]))
+            writer = csv.DictWriter(stream, fieldnames=list(summaries[0]), lineterminator="\n")
             writer.writeheader()
             writer.writerows(summaries)
     print("PASS: all values agree within tolerance" if report["passed"] else "FAIL: outputs differ")

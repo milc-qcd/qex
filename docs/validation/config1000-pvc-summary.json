@@ -1,0 +1,59 @@
+{
+  "reference": "/work2/11599/mdai07/stampede3/test/hisqflow_directional_20261026/gpu-sycl-validation/015phys-cfg1000-20261105-pvc-gpu/reference",
+  "candidate": "/work2/11599/mdai07/stampede3/test/hisqflow_directional_20261026/gpu-sycl-validation/015phys-cfg1000-20261105-pvc-gpu/attempts/job_3685973",
+  "configuration": "1000",
+  "rtol": 1e-08,
+  "atol": 1e-10,
+  "criterion": "abs(candidate-reference) <= atol + rtol*abs(reference), for every value",
+  "passed": true,
+  "job_id": "3685973",
+  "physics_commit": "3c408c82f560e0392f63e451e70b13205abc389b",
+  "device": "Intel Data Center GPU Max 1550",
+  "backend": "SYCL Level Zero",
+  "files": {
+    "gaugeobs_C0p0_1000": {
+      "count": 1064,
+      "failed_values": 0,
+      "max_absolute_error": 6.919465000976288e-14,
+      "max_scaled_error": 3.722944373451139e-05,
+      "difference_l2": 2.600600247524597e-13,
+      "reference_l2": 42.2651476395895,
+      "relative_l2": 6.1530608379766575e-15,
+      "worst": {
+        "path": [
+          "0.64",
+          "topological-charge"
+        ],
+        "reference": -0.1758600158068438,
+        "candidate": -0.175860015806913,
+        "absolute_error": 6.919465000976288e-14,
+        "scaled_error": 3.722944373451139e-05
+      },
+      "reference_sha256": "8285aaa61a89d3423d8e5723b8603fbfad3db9fa7a39c20688bab35cb9e19519",
+      "candidate_sha256": "cee838ba029e123a57d8751120abbab0d90d61d75fa7113808f9ffafea7bbb43"
+    },
+    "correlator_C0p0_1000": {
+      "count": 9216,
+      "failed_values": 0,
+      "max_absolute_error": 2.8322233447397593e-11,
+      "max_scaled_error": 0.004825398480303322,
+      "difference_l2": 1.224425662975358e-10,
+      "reference_l2": 14330.895393542472,
+      "relative_l2": 8.543957857141895e-15,
+      "worst": {
+        "path": [
+          "0.00",
+          "A0P_thin_im_ss",
+          5
+        ],
+        "reference": 0.02648363254007258,
+        "candidate": 0.02648363254183306,
+        "absolute_error": 1.7604806501481107e-12,
+        "scaled_error": 0.004825398480303322
+      },
+      "reference_sha256": "6fba9383bd263f61065885d261664bb57f2f1a5eaac49e145637c0588ecb76f0",
+      "candidate_sha256": "3464a78bc891209a60b183a751cba998e6231e2a5689577269ecf2ba18aa2f68"
+    }
+  },
+  "complete_report": "/work2/11599/mdai07/stampede3/test/hisqflow_directional_20261026/gpu-sycl-validation/015phys-cfg1000-20261105-pvc-gpu/attempts/job_3685973/comparison.json"
+}
