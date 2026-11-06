@@ -18,6 +18,11 @@ establish A100 execution or Perlmutter MPI compatibility.
 
 ## Compiler and runtime
 
+A CUDA-enabled LLVM/DPC++ v7.2.0 installation has been prepared on Stampede3;
+[its setup record](NVIDIA_SYCL_RUNTIME.md) documents the compiler/runtime pairing
+and build compatibility fixes. Its Intel MPI and host OpenMP settings are
+Stampede3-specific; activate and validate the corresponding Perlmutter setup.
+
 Use a CUDA-enabled LLVM DPC++/oneAPI compiler **and its matching CUDA runtime
 adapter**, Nim 2, the site's CUDA toolkit, and Cray MPICH. The generic NERSC
 C++ page shows an old `intel/2024.1.0` example, but the [February 19, 2026

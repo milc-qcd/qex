@@ -27,7 +27,14 @@ if [[ "$BACKEND" == SYCL && "$SYCL_TARGET" != generic ]]; then
     exit 2
   fi
   # Nim passes these through to the C++ compiler at compile AND link time.
-  CUDA_FLAGS="-fsycl-targets=nvptx64-nvidia-cuda -Xsycl-target-backend=nvptx64-nvidia-cuda --cuda-gpu-arch=$CUDA_ARCH"
+  # Current LLVM uses the architecture-qualified target; oneAPI 2024 uses
+  # backend forwarding. Explicit architecture selection also works on login
+  # nodes where no NVIDIA GPU is available for native-target detection.
+  case "${SYCL_CUDA_ARCH_STYLE:-legacy}" in
+    legacy) CUDA_FLAGS="-fsycl-targets=nvptx64-nvidia-cuda -Xsycl-target-backend=nvptx64-nvidia-cuda --cuda-gpu-arch=$CUDA_ARCH" ;;
+    target) CUDA_FLAGS="-fsycl-targets=nvidia_gpu_$CUDA_ARCH" ;;
+    *) echo "SYCL_CUDA_ARCH_STYLE must be legacy or target" >&2; exit 2 ;;
+  esac
   EXTRA_FLAGS+=("--passC:$CUDA_FLAGS" "--passL:$CUDA_FLAGS")
   # Preserve shell quoting in the compiler command Nim constructs.
   printf -v CUDA_OPTION '%q' "--cuda-path=$CUDA_TOOLKIT"

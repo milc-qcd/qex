@@ -19,6 +19,7 @@ case "$SYCL_TARGET" in
   *) echo "SYCL_TARGET must be generic, h100 or a100" >&2; exit 2 ;;
 esac
 export SYCL_TARGET
+LOGS=${QEX_VALIDATION_LOGS:-$LOGS}
 mkdir -p "$LOGS"
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-2}
 export CL_CONFIG_CPU_MAX_COMPUTE_UNITS=${CL_CONFIG_CPU_MAX_COMPUTE_UNITS:-2}

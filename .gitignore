@@ -10,3 +10,6 @@ nimcache/
 # Local MPI dependency installs and generated build logs
 /deps-mpi/
 /build-mpi/stagflow-build.log
+
+# Dependencies rebuilt with the CUDA-enabled LLVM toolchain
+/deps-sycl/

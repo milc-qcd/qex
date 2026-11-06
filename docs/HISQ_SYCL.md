@@ -100,35 +100,40 @@ Perlmutter binaries.
 
 ## Interim target: Stampede3 NVIDIA H100
 
+A matching user-local CUDA-enabled LLVM SYCL toolchain is now installed. See
+[NVIDIA runtime setup and validation](NVIDIA_SYCL_RUNTIME.md) for the reproducible
+installer, environment, isolated dependency builds, and queued H100 checks.
+
 The interim GPU target is **NVIDIA H100** (compute capability 9.0,
 `sm_90`, per [NVIDIA's CUDA GPU table](https://developer.nvidia.com/cuda/gpus)).
 The H100 profile uses the **SYCL CUDA backend**. It requires a SYCL compiler
 and runtime built with NVIDIA support, such as CUDA-enabled LLVM DPC++ or a
 matching oneAPI installation with the NVIDIA plugin, plus a compatible CUDA
-toolkit and driver. The existing Stampede3 compiler can generate the NVIDIA
-kernels, but the inspected runtime installation does not contain its CUDA
-adapter (`libpi_cuda.so`). Changing the device selector alone does not add
-that adapter.
+toolkit and driver. The site oneAPI compiler can generate NVIDIA kernels, but its runtime lacks
+the CUDA adapter (`libpi_cuda.so` in that older runtime). The new user-local
+toolchain includes `libur_adapter_cuda.so`. Compiler, headers and runtime must
+be selected together as described in the setup guide above.
 
-On the H100 machine, load its compiler, CUDA and MPI environment. Use QMP/QIO
-built for that machine's MPI stack; the copied Stampede3 dependencies are only
-verified with the existing Intel MPI environment. Then configure:
+On Stampede3, activate the installed compiler/runtime and its LLVM-built
+QMP/QIO dependencies together:
 
 ```bash
+source ./load-mpi-env.sh
+source ./scripts/load-nvidia-sycl-env.sh
 export SYCL_TARGET=h100
-export SYCL_CXX=/path/to/cuda-enabled/compiler/bin/icpx  # or clang++
-export CUDA_PATH=/path/to/cuda
-export QMP_DIR=/path/to/target-mpi/qmp
-export QIO_DIR=/path/to/target-mpi/qio
 ./scripts/build-hisq-sycl.sh SYCL hisqflow
 ```
 
+For a fresh installation, first follow [the runtime setup guide](NVIDIA_SYCL_RUNTIME.md)
+to install the pinned toolchain and build QMP/QIO for the selected MPI stack.
+
 `CXX` defaults to `mpicxx`. The build script sets the underlying compiler
 through `I_MPI_CXX`, `OMPI_CXX`, or `MPICH_CXX` as appropriate; explicit values
-already set by the caller take precedence. H100 output and caches are isolated
-under `build-sycl/SYCL-h100/`.
+already set by the caller take precedence. H100 output and caches are isolated under the selected `QEX_BUILD_ROOT`;
+the installed LLVM setup uses `build-sycl/llvm-v7.2.0/SYCL-h100/`.
 
-Both compilation and linking receive:
+The installed LLVM setup uses `-fsycl-targets=nvidia_gpu_sm_90` for both
+compilation and linking. The legacy oneAPI setup uses the equivalent form:
 
 ```text
 -fsycl-targets=nvptx64-nvidia-cuda
@@ -147,11 +152,11 @@ The suite forces `ONEAPI_DEVICE_SELECTOR=cuda:gpu`, checks that all visible
 GPUs are NVIDIA H100s with FP64 and device USM, and stops on failure. Its
 preflight is compiled as a host-only SYCL program; the following QEX smoke
 and physics programs exercise the actual `sm_90` kernels. Logs go to
-`build-sycl/validation-h100/`. Use the same CUDA selector when running the
+`$QEX_BUILD_ROOT/validation-h100/`. Use the same CUDA selector when running the
 application with its existing JSON/command-line arguments:
 
 ```bash
-ONEAPI_DEVICE_SELECTOR=cuda:gpu ./build-sycl/SYCL-h100/hisqflow ...
+ONEAPI_DEVICE_SELECTOR=cuda:gpu "$QEX_BUILD_ROOT/SYCL-h100/hisqflow" ...
 ```
 
 The suite uses two MPI ranks. With two visible H100s on one node, QEX's
@@ -196,8 +201,8 @@ node has no H100, and the inspected Intel compiler installations (2024.0,
 runtime and a GPU allocation are still required. Runtime availability on
 compute nodes has not been checked.
 
-Once the runtime is available, submit the prepared single-node validation
-job **from this repository's root**:
+The current single-node validation job selects the installed LLVM toolchain.
+After building its binaries, submit **from this repository's root**:
 
 ```bash
 sbatch scripts/validate-hisq-h100-stampede3.sbatch
@@ -205,13 +210,13 @@ sbatch scripts/validate-hisq-h100-stampede3.sbatch
 
 It uses the existing `TG-MCA93S002` account and the node-exclusive `h100`
 partition, which advertises no GPU GRES. Override the account with `sbatch -A`
-if needed. `H100_SYCL_ENV=/absolute/path/to/setup.sh` can supply additional
-site runtime setup after `load-mpi-env.sh`; it must preserve compatibility
-with the prebuilt oneAPI 2024 binaries and Intel MPI dependencies. The job
+if needed. `H100_SYCL_ENV=/absolute/path/to/setup.sh` can override the default
+`scripts/load-nvidia-sycl-env.sh` setup after `load-mpi-env.sh`; it must select
+the compiler/runtime and MPI dependencies matching the prebuilt binaries. The job
 checks GPU visibility, then runs the prebuilt numerical programs with
 `SKIP_BUILD=1`. The small host-only device preflight is still compiled.
-It stops if the runtime cannot expose an H100. Do not submit it with the
-current CPU-only runtime expecting GPU validation to succeed.
+It stops if the selected runtime cannot expose an H100. The site oneAPI
+runtime alone is insufficient; use the installed CUDA-enabled toolchain.
 
 For a different SYCL/MPI toolchain, rebuild the binaries and dependencies
 before submitting. The earlier numerical results below are SYCL CPU results.
