@@ -18,8 +18,8 @@ The downloaded Linux archive was checked against its published SHA-256:
 
 The installer records the source and checksum in `qex-install-manifest.json`.
 The original site compilers, copied CPU repository, and previously validated
-Intel-GPU binaries are preserved. Installing this adapter does not establish
-NVIDIA hardware correctness; the H100 job below must pass on actual hardware.
+Intel-GPU binaries are preserved. H100 job 3686550 has now passed the
+CUDA preflight and numerical suite on actual NVIDIA H100 hardware.
 
 ## Setup and reproducible installation
 
@@ -125,21 +125,29 @@ Build job **3686548** completed successfully on November 5, 2026, node
 | Full H100 `hisqflow` | Built and linked; host libraries resolve without missing dependencies |
 | A100 device preflight, smoke, flow, gauge, halo and metadata programs | Built and linked |
 | Full A100 `hisqflow` | Built and linked for Stampede3; not Perlmutter-linked |
-| NVIDIA kernel execution | **Pending** |
+| NVIDIA kernel execution | **Passed** on H100, job 3686550 |
 
-H100 validation job **3686550** was submitted with `afterok:3686548`. Its build
-dependency is now satisfied, and it is waiting for queue priority. No actual
-start time was assigned at the final check. The initial `sbatch --test-only`
-estimate was November 9; it was an estimate, not a reservation.
-The job will execute the CUDA preflight and numerical suite when scheduled.
+H100 validation job **3686550** completed on November 8, 2026 at 21:29:53 CST,
+on node `c561-002`, elapsed **1 min 42 s**, exit status **0:0**. The CUDA
+runtime exposed four NVIDIA H100 devices. All smoke, gauge-force/smearing,
+Wilson/rectangle flow, coupled fermion flow, narrow Naik halo, metadata and
+one/two-rank exchange checks passed. The two-rank coupled fermion comparison
+had maximum relative error **4.69547e-15**. These were small correctness checks.
+
+The full configuration 1000 H100 comparison is now submitted as job
+**3699217**, pending queue priority as of November 9. It uses the same lattice,
+32-rank layout, two host threads per rank, flow parameters and CPU reference
+as the completed Intel GPU comparison. See
+[the configuration 1000 record](CONFIG1000_VALIDATION.md#h100-full-configuration-submission).
+No full-configuration H100 timing or correctness result is available yet.
 
 The [tracked installation/build record](validation/nvidia-runtime-20261105.json)
 contains the release checksum and all H100/A100 binary hashes. Detailed build,
 CPU-check, and dependency logs remain under `build-sycl/llvm-v7.2.0/`.
 The login node lacks NVIDIA driver libraries (`libcuda.so.1` and
 `libnvidia-ml.so.1`), as expected for this non-NVIDIA host. Actual adapter loading
-and kernel execution must be checked on the H100 node; installing the adapter
-and cross-compiling are not counted as a CUDA hardware pass.
+and kernel execution were verified by job 3686550 on the H100 node; the
+installation and cross-build alone were not counted as a CUDA hardware pass.
 
 ## Perlmutter
 

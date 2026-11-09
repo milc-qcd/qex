@@ -80,8 +80,10 @@ Before the full run, single-GPU gauge force/smearing/RK checks and single-
 and two-rank coupled gauge/fermion checks passed on Intel Max 1550 devices.
 The largest coupled fermion error in the two-rank test was `2.09221e-15`.
 The small gauge test covered Wilson and rectangle actions; this full
-configuration used Wilson only. H100/A100 execution and Perlmutter MPI/runtime
-integration still require validation.
+configuration used Wilson only. H100 small-lattice checks subsequently passed
+in job 3686550 on November 8. Full-configuration H100 execution is queued as
+described below; A100 execution and Perlmutter MPI/runtime integration remain
+unvalidated.
 
 A companion SYCL CPU-device job, `3685967`, was stopped after the complete
 GPU comparison passed, to release its allocation. Its partial output is not
@@ -126,3 +128,42 @@ the isolated run root; the batch script makes a new job-specific attempt:
 cd /work2/11599/mdai07/stampede3/test/hisqflow_directional_20261026/gpu-sycl-validation/015phys-cfg1000-20261105-pvc-gpu
 sbatch --export=ALL,QEX_DEVICE_SELECTOR=level_zero:gpu run.sbatch
 ```
+
+## H100 full configuration submission
+
+Job **3699217** was submitted on November 9, 2026 for the full configuration
+1000 comparison, using the H100 binary validated by the small-lattice suite.
+At submission it is **pending for priority**, with no assigned start time.
+The pre-submission test-only estimate was November 14 at 00:36 CST; this is
+not a reservation and may change. There is no full H100 result yet.
+
+The run keeps the same `32 x 32 x 32 x 48` lattice, `[2,2,4,2]` rank geometry,
+32 MPI ranks, two OpenMP threads per rank, three allocated cores per rank,
+Wilson step 0.02 through 1.50, and original CPU references. It requests one
+H100 node for up to 30 minutes. Four visible H100 GPUs are expected, with
+eight MPI ranks per GPU under QEX's rank-modulo-device mapping. The executable
+SHA-256 is `30580c5a93945fb545a940b3e0801a2e5b11fb9b7e6ce743d383bdca1a42a370`.
+
+The isolated run root is:
+
+```text
+/work2/11599/mdai07/stampede3/test/hisqflow_directional_20261026/gpu-sycl-validation/015phys-cfg1000-20261109-h100
+```
+
+The [H100 batch script](../scripts/compare-015phys-config1000-h100.sbatch)
+verifies frozen input checksums and the H100/CUDA/FP64/device-USM preflight,
+then runs the complete application, output-completeness validator, and all-value
+CPU comparison with the unchanged `atol=1e-10`, `rtol=1e-8` criterion. It saves
+results under `attempts/job_3699217/`, including `run.log`, `comparison.json`,
+`comparison.csv`, and `status.json`. Application time is extracted from the
+initialization-to-finalization timer for comparison with the earlier runs.
+
+GPU telemetry samples `nvidia-smi memory.used` once per second during the
+application. `gpu-telemetry.csv` retains the raw samples and
+`gpu-memory-summary.json` reports the sampled peak for each physical GPU.
+This includes device-wide process/driver usage and can miss shorter peaks;
+it is not an exact QEX allocation counter. Host memory can be checked in
+Slurm accounting after completion; GNU time's RSS alone is not a total for
+all MPI ranks. Input and original-reference hashes were verified before
+submission. The [submission record](validation/config1000-h100-submission.json)
+records the job, resource request, binary hash, and run directory.

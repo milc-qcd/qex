@@ -7,7 +7,7 @@
   "toolchain_manifest": "/work2/11599/mdai07/stampede3/opt/llvm-sycl-v7.2.0-cuda/qex-install-manifest.json",
   "build_job": "3686548",
   "h100_validation_job": "3686550",
-  "hardware_validation": "pending: H100 job 3686550 waiting for priority; no NVIDIA kernel execution claimed",
+  "hardware_validation": "passed: H100 job 3686550 completed with exit 0:0 on NVIDIA H100 through the SYCL CUDA backend",
   "source_changes": "build and environment scripts only; gauge/fermion algorithms unchanged",
   "build_status": "completed, exit 0:0, elapsed 00:09:40",
   "cpu_checks": {
@@ -36,5 +36,17 @@
       "check_gpu_mem": "a1ac1c319d1164cd7f15922efbe3d961f3e3086ce542b96a31504ab7577d750f",
       "hisqflow": "6b215c96e0e499d41d9e810343b7cd5fa6103b1fbfb91353d53a6c9ec23e9e12"
     }
+  },
+  "hardware_validation_updated_utc": "2026-11-09T18:16:48.976872+00:00",
+  "h100_hardware_result": {
+    "job_id": "3686550",
+    "node": "c561-002",
+    "finished": "2026-11-08T21:29:53-06:00",
+    "elapsed": "00:01:42",
+    "exit_code": "0:0",
+    "visible_h100_devices": 4,
+    "numerical_checks": "all passed, including one/two-rank coupled flow and halo exchange",
+    "two_rank_max_coupled_fermion_relative_error": 4.695472691696356e-15,
+    "logs": "/work2/11599/mdai07/stampede3/qex-gpu-sycl/build-sycl/llvm-v7.2.0/validation-h100/job_3686550"
   }
 }
