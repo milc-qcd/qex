@@ -1,0 +1,98 @@
+{
+  "recorded_utc": "2026-11-10T21:30:52.425088+00:00",
+  "status": "implemented; final linking and GPU numerical validation pending",
+  "branch": "hisq-flow-sycl",
+  "quda_revision": "af7e15080e247795ef076b6d9284478755a9a683",
+  "backend": "CUDA with SYCL flow, H100 sm_90",
+  "completed": [
+    "QUDA CMake configuration with pinned source, GCC 13.2 and CUDA 12.4",
+    "CPU-only hisqflow compilation and linking",
+    "CPU-only executable rejects --solver=quda and invalid solver names",
+    "QUDA-enabled hisqflow Nim generation and all C++/SYCL object compilation with --noLinking",
+    "check_quda_hisq Nim generation and all C++/SYCL object compilation with --noLinking",
+    "Shell syntax checks and git diff --check"
+  ],
+  "not_yet_completed": [
+    "Complete QUDA library build and installation",
+    "QUDA-enabled application/test final linking",
+    "CPU two-rank coupled-flow regression",
+    "H100 one/two-rank QUDA residual, propagator and subsequent coupled-flow tests",
+    "Full configuration 1000 CPU-solve and QUDA-solve comparisons, each using SYCL flow",
+    "QUDA performance and GPU-memory measurements"
+  ],
+  "bounded_library_probe": {
+    "result": "Stopped after the intended 150-second limit (exit 124); no complete library produced",
+    "progress": "Host objects compiled without reported errors through 33% of the build progress counter",
+    "log": "deps-quda/build-records/compiler-probe.log"
+  },
+  "submission": {
+    "library_build_job": "3705169",
+    "qex_build_job": "3705235",
+    "created_utc": "2026-11-10T21:17:13.328273+00:00",
+    "quda_revision": "af7e15080e247795ef076b6d9284478755a9a683",
+    "validation_root": "/work2/11599/mdai07/stampede3/test/hisqflow_directional_20261026/gpu-sycl-validation/015phys-cfg1000-20261110-quda-h100",
+    "h100_validation_job": "3705247"
+  },
+  "queue_snapshot": [
+    {
+      "job": "3699217",
+      "state": "PENDING",
+      "reason": "Priority"
+    },
+    {
+      "job": "3705247",
+      "state": "PENDING",
+      "reason": "Dependency"
+    },
+    {
+      "job": "3705169",
+      "state": "PENDING",
+      "reason": "Priority"
+    },
+    {
+      "job": "3705235",
+      "state": "PENDING",
+      "reason": "Dependency"
+    }
+  ],
+  "checks": {
+    "true_residual_squared_limit": "1.01 * 1e-20",
+    "propagator_relative_error_limit": 1e-08,
+    "full_comparison": "abs(candidate-reference) <= 1e-10 + 1e-8 * abs(reference)",
+    "full_values": {
+      "gauge": 1064,
+      "correlator": 9216
+    }
+  },
+  "local_logs": [
+    {
+      "path": "deps-quda/build-records/local-checks-20261110/quda-configure.log",
+      "sha256": "e28b914279c7c06147af9b8276aa6631729f5b4be51f33bd984bc1708b0501a7"
+    },
+    {
+      "path": "deps-quda/build-records/local-checks-20261110/application-objects.log",
+      "sha256": "ce8568c8ba8eeb63502f412ee4db7688ef26f0aef5541d5b2031b71a07ec259c"
+    },
+    {
+      "path": "deps-quda/build-records/local-checks-20261110/test-objects.log",
+      "sha256": "3743d788d3ef896a528c0dd3dc2ff8582591752cb84f7a382ce3d91941a1cc50"
+    },
+    {
+      "path": "deps-quda/build-records/local-checks-20261110/cpu-build.log",
+      "sha256": "12827b14ff76f6f40441993f0f52b5860214d7a6114c9d927302876840848849"
+    },
+    {
+      "path": "deps-quda/build-records/local-checks-20261110/cpu-no-quda.log",
+      "sha256": "795719a028f8f21231d784a6c31b281e22f098159333e92bf65a96aad909ed46"
+    },
+    {
+      "path": "deps-quda/build-records/local-checks-20261110/cpu-invalid-solver.log",
+      "sha256": "053b2bfaaf635f686007aa58709422066ae38e381122538687090ff748506d4d"
+    }
+  ],
+  "notes": [
+    "Local logs and dependency artifacts are ignored by Git.",
+    "No QUDA hardware correctness or speedup result is claimed.",
+    "Previously submitted flow-only H100 job 3699217 is unchanged."
+  ]
+}

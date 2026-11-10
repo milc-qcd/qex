@@ -40,6 +40,29 @@ if [[ "$BACKEND" == SYCL && "$SYCL_TARGET" != generic ]]; then
   printf -v CUDA_OPTION '%q' "--cuda-path=$CUDA_TOOLKIT"
   EXTRA_FLAGS+=("--passC:$CUDA_OPTION" "--passL:$CUDA_OPTION")
 fi
+# A QUDA-enabled executable gets its own cache/output directory. Existing
+# flow-only binaries stay available for the CPU-solver comparison.
+if [[ -n "${QUDA_DIR:-}" && "$TARGET" != check_cuda_device ]]; then
+  if [[ "$BACKEND" == SYCL && "$SYCL_TARGET" == generic ]]; then
+    echo "This QUDA profile requires a CUDA SYCL target (h100 or a100)." >&2
+    exit 2
+  fi
+  [[ -f "$QUDA_DIR/include/quda.h" && -f "$QUDA_DIR/include/quda_milc_interface.h" ]] || {
+    echo "Missing QUDA installation headers under $QUDA_DIR" >&2; exit 2;
+  }
+  QUDA_CUDA_LIB=${CUDA_LIB_DIR:-${CUDA_PATH:?Set CUDA_PATH for QUDA}/lib64}
+  [[ -f "$QUDA_CUDA_LIB/libcudart.so" ]] || {
+    echo "Set CUDA_LIB_DIR to the CUDA runtime library directory." >&2; exit 2;
+  }
+  BUILD="$BUILD-quda"
+  EXTRA_FLAGS+=("-d:qudaDir:$QUDA_DIR" "-d:cudaLibDir:$QUDA_CUDA_LIB" -d:qexQudaCuda)
+  if [[ -n "${CUDA_MATH_LIB_DIR:-}" ]]; then
+    EXTRA_FLAGS+=("-d:cudaMathLibDir:$CUDA_MATH_LIB_DIR")
+  fi
+  if [[ "$BACKEND" == SYCL ]]; then EXTRA_FLAGS+=(-d:qexQudaSycl); fi
+  printf -v QUDA_CUDA_INCLUDE '%q' "-I${CUDA_PATH:?}/include"
+  EXTRA_FLAGS+=("--passC:$QUDA_CUDA_INCLUDE")
+fi
 mkdir -p "$BUILD"
 if [[ "$TARGET" == check_cuda_device ]]; then
   if [[ "$BACKEND" != SYCL ]]; then

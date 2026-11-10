@@ -7,7 +7,10 @@ Both targets use the same physics code and the `hisqflow` application.
 The GPU performs gauge force/update, HISQ link smearing, the directional
 fermion-flow Laplacian, Runge–Kutta vector updates, and halo packing. Gauge
 fields, sources, and stage workspaces remain on the device between stages.
-**The HISQ inversion, measurements, and configuration I/O still run on CPU.**
+**The HISQ inversion defaults to CPU; measurements and configuration I/O run
+on CPU.** An optional CUDA QUDA solver can be compiled and selected with
+`--solver=quda`; see [QUDA build and validation](docs/QUDA_SOLVER.md). Its
+hardware validation is pending; the validated flow-only builds remain available.
 The implementation uses double precision, SU(3), zero fermion-flow mass, and
 Wilson or rectangle gauge actions. See [implementation details](docs/HISQ_SYCL.md).
 

@@ -1,6 +1,8 @@
 import qex
 #import examples/[hisqhmc_h]
 import hisqflowutils #hisqtestutils
+import hisqsolver
+import quda/qudaWrapper
 import json
 
 import gauge/[gaugefix, hisqsmear]
@@ -111,7 +113,9 @@ qexInit()
 
 var 
   #reads command line arguments into a json object
-  cmd = readCMD() 
+  cmd = readCMD()
+  solverBackend = selectHisqSolver(
+    if cmd.hasKey("solver"): cmd["solver"].getStr() else: "qex")
   #e.g. command: ./fermionflow --flow-json:flow-info.json --lattice-json:lattice-info.json --configuration:100 --base-filename:config_name_stem --output:fflow_corr
   flowInfo = case cmd.hasKey("flow-json")
     of true: readJSON(cmd["flow-json"].getStr())
@@ -228,6 +232,8 @@ if false:#fixGauge:
 var sp = initSolverParams()
 sp.r2req = r2req
 sp.maxits = maxits
+sp.backend = solverBackend
+qexLog "HISQ solver backend: ", (if sp.backend == sbQuda: "quda" else: "qex")
 
 #[ spectrum ]#
 # build meson operators & select mesons as subset
@@ -334,6 +340,21 @@ block:
         for massIdx in 0..<Masses:
           threads: props[color][srct][corner][massIdx] := 0
           stag.solve(props[color][srct][corner][massIdx], src, mass[massIdx], sp)
+          if sp.backend == sbQuda:
+            # Verify the original, unpreconditioned equation with QEX's D.
+            # This also catches a failed inner solve or a normalization mismatch.
+            var check = src.newOneOf
+            threads:
+              stag.D(check, props[color][srct][corner][massIdx], mass[massIdx])
+              threadBarrier()
+              check := src - check
+            let trueR2 = check.norm2 / src.norm2
+            qexLog "QUDA true relative residual squared: ", trueR2
+            if (cast[uint64](trueR2) and 0x7ff0000000000000'u64) == 0x7ff0000000000000'u64 or
+                trueR2 > 1.01*sp.r2req:
+              qexError "QUDA HISQ solve did not satisfy the requested true residual"
+if sp.backend == sbQuda:
+  qudaShutdown()
 qexGC("after HISQ Dirac inversion")
 u.rephase() #phase out
 

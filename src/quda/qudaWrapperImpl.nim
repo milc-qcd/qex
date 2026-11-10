@@ -11,6 +11,11 @@ import gauge/gaugeAction
 #import solvers/cg
 
 import os, times
+when defined(qexQudaSycl):
+  import backend/syclbe
+elif defined(qexQudaCuda):
+  proc cudaGetDeviceCount(count: ptr cint): cint {.
+    importc, header: "<cuda_runtime_api.h>".}
 
 when not defined(qudaDir):
   {.fatal:"Must define qudaDir to use QUDA.".}
@@ -69,13 +74,8 @@ type
 var qudaParam: QudaParam    ## Global quda parameter.
 
 proc qudaInit* =
-  ## Just to initialize the global parameter.
-  ## Assumes single GPU per rank.
-  #let n = max(1,cudaGetDeviceCount())
-  #echo "cudaGetDeviceCount: ",n
-  #let n = 1
-  #qudaParam.initArg.layout.device = cint(myrank mod n)
-  #qudaParam.initArg.layout.device = -1.cint
+  ## Register host state only. CPU solves in a QUDA-enabled binary must not
+  ## initialize QUDA or consume GPU memory.
   qudaParam.initArg.layout.device = 0.cint
   qudaParam.initArg.layout.latsize = qudaParam.physGeom[0].addr
   qudaParam.initArg.layout.machsize = qudaParam.rankGeom[0].addr
@@ -83,8 +83,14 @@ proc qudaInit* =
   qudaParam.initArg.verbosity = QUDA_SILENT
   qudaParam.initialized = false
 
+proc qudaShutdown*() =
+  ## Release QUDA workspaces before the resident SYCL flow starts.
+  if qudaParam.initialized:
+    qudaFinalize()
+    qudaParam.initialized = false
+
 qexGlobalInitializers.add qudaInit
-qexGlobalFinalizers.add qudaFinalize
+qexGlobalFinalizers.add qudaShutdown
 
 var qudaLayout: Layout[1]
 
@@ -106,7 +112,16 @@ proc qudaSetup*(l: Layout, verbosity = QUDA_SILENT): Layout[1] =
     qudaParam.physGeom[i].update l.physGeom[i].cint
     qudaParam.rankGeom[i].update l.rankGeom[i].cint
   if updated or (not qudaParam.initialized):
-    if qudaParam.initialized: qudaFinalize()
+    qudaShutdown()
+    when defined(qexQudaSycl):
+      if getEnv("QUDA_DEVICE_RESET") == "1":
+        qexError "QUDA_DEVICE_RESET=1 would destroy the SYCL CUDA context"
+      qudaParam.initArg.layout.device = gpuCudaDeviceOrdinal()
+    elif defined(qexQudaCuda):
+      var count: cint
+      if cudaGetDeviceCount(addr count) != 0 or count <= 0:
+        qexError "QUDA solver requires a visible CUDA GPU"
+      qudaParam.initArg.layout.device = cint(myRank mod count.int)
     proc qudaCommsMap(coords0: ptr quda.ConstInt; fdata: pointer): cint {.cdecl.} =
       let pl = cast[ptr type(l)](fdata)
       let coords = cast[ptr UncheckedArray[cint]](coords0)
@@ -115,6 +130,11 @@ proc qudaSetup*(l: Layout, verbosity = QUDA_SILENT): Layout[1] =
     initCommsGridQuda(qudaParam.rankGeom.len.cint,
                       cast[ptr quda.ConstInt](qudaParam.rankGeom[0].addr),
                       qudaCommsMap, unsafeAddr(l))
+    when defined(qexQudaCuda):
+      # The MILC multi-GPU initializer calls initQuda(-1), ignoring layout.device.
+      # Set the device first; its subsequent initQudaDevice call is idempotent.
+      initQudaDevice(qudaParam.initArg.layout.device)
+      echo "QUDA CUDA device: ", qudaParam.initArg.layout.device, " (MPI rank ", myRank, ")"
     qudaInit(qudaParam.initArg)
     qudaParam.layout = l.physGeom.newLayout(1, l.rankGeom)
     #qudaParam.longlinkG.new qudaParam.layout
@@ -185,11 +205,16 @@ proc qudaSolveXX*(s:Staggered; r,t:Field; m:SomeNumber; sp: var SolverParams;
     relRes = 0
     rres:cdouble = 0.0
     rrelRes:cdouble = 0.0
-    iters:cint = 1
+    iters:cint = -1  # MILC interface: invalidate cached links for this solve.
     fatlink: pointer = g1.dataPtr
     longlink: pointer = g3.dataPtr
     srcGpu: pointer = t1.dataPtr
     destGpu: pointer = r1.dataPtr
+  # The HISQ coefficients and antiperiodic signs are already in the QEX links.
+  # A zero tadpole (the default object value) produces an invalid Naik scale.
+  invargs.tadpole = 1.0
+  invargs.naik_epsilon = 0.0
+  invargs.solver_type = QUDA_CG_INVERTER
   invargs.maxIter = sp.maxits.cint
   invargs.evenodd = (if parEven: QUDA_EVEN_PARITY else: QUDA_ODD_PARITY)
   invargs.mixedPrecision = case sp.sloppySolve:

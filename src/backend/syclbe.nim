@@ -26,6 +26,20 @@ proc gpuInit*(device: int) =
   dev = devs[d]
   q = dev.queue
 
+when defined(qexQudaSycl):
+  # Query the native ordinal of the selected SYCL device. Device enumeration
+  # can be filtered/reordered, so rank modulo CUDA's device count is not enough.
+  proc isCuda(d: Device): bool {.
+    importcpp: "(#.get_backend() == sycl::backend::ext_oneapi_cuda)",
+    header: "<sycl/backend/cuda.hpp>".}
+  proc nativeCudaOrdinal(d: Device): cint {.
+    importcpp: "static_cast<int>(sycl::get_native<sycl::backend::ext_oneapi_cuda>(#))",
+    header: "<sycl/backend/cuda.hpp>".}
+  proc gpuCudaDeviceOrdinal*(): cint =
+    if not isCuda(dev):
+      raise newException(ValueError, "QUDA solver requires a CUDA SYCL device")
+    nativeCudaOrdinal(dev)
+
 template gpuMalloc*(size: SomeInteger): pointer = mallocDevice(size, q)
 template gpuMalloc[T](x: var ptr UncheckedArray[T], n: int) =
   x = cast[typeof x](gpuMalloc(n*sizeof(T)))

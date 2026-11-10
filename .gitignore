@@ -13,3 +13,6 @@ nimcache/
 
 # Dependencies rebuilt with the CUDA-enabled LLVM toolchain
 /deps-sycl/
+
+# Pinned QUDA source, CUDA builds, and local installation
+/deps-quda/

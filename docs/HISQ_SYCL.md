@@ -46,7 +46,9 @@ The matrix exponential specializes QEX's existing order-four expm1 algorithm
 with 20 scaling/squaring steps. Its numerical algorithm is unchanged; selecting
 it explicitly avoids inlining unused runtime branches into the device kernel.
 
-Inversion, measurement reductions and file I/O remain on CPU. At the end of
+Inversion defaults to CPU; [optional QUDA inversion](QUDA_SOLVER.md) can be
+compiled and selected independently of the flow backend. Measurement reductions
+and file I/O remain on CPU. At the end of
 each complete flow step, the integrator downloads one snapshot for the existing
 measurement interface. No full-field download is needed between RK stages or
 between the two applications of a directional operator. The standalone

@@ -74,7 +74,7 @@ type
     QUDA_MOBIUS_DWF_EOFA_DSLASH, QUDA_STAGGERED_DSLASH, QUDA_ASQTAD_DSLASH,
     QUDA_TWISTED_MASS_DSLASH, QUDA_TWISTED_CLOVER_DSLASH, QUDA_LAPLACE_DSLASH,
     QUDA_COVDEV_DSLASH
-  QudaInverterType* {.size: sizeof(cint).} = enum
+  QudaInverterType* {.importc: "QudaInverterType", header: "enum_quda.h", size: sizeof(cint).} = enum
     QUDA_INVALID_INVERTER = QUDA_INVALID_ENUM, QUDA_CG_INVERTER = 0, QUDA_BICGSTAB_INVERTER,
     QUDA_GCR_INVERTER, QUDA_MR_INVERTER, QUDA_SD_INVERTER, QUDA_PCG_INVERTER,
     QUDA_EIGCG_INVERTER, QUDA_INC_EIGCG_INVERTER, QUDA_GMRESDR_INVERTER,
@@ -177,7 +177,7 @@ type
     QUDA_PACKED_CLOVER_ORDER, ##  even-odd, QDP packed
     QUDA_QDPJIT_CLOVER_ORDER, ##  (diagonal / off-diagonal)-chirality-spacetime
     QUDA_BQCD_CLOVER_ORDER    ##  even-odd, super-diagonal packed and reordered
-  QudaVerbosity* {.size: sizeof(cint).} = enum
+  QudaVerbosity* {.importc: "QudaVerbosity", header: "enum_quda.h", size: sizeof(cint).} = enum
     QUDA_INVALID_VERBOSITY = QUDA_INVALID_ENUM, QUDA_SILENT = 0, QUDA_SUMMARIZE, QUDA_VERBOSE,
     QUDA_DEBUG_VERBOSE
   QudaPreserveDirac* {.size: sizeof(cint).} = enum
@@ -198,7 +198,7 @@ type
 ##
 
 type
-  QudaParity* {.size: sizeof(cint).} = enum
+  QudaParity* {.importc: "QudaParity", header: "enum_quda.h", size: sizeof(cint).} = enum
     QUDA_INVALID_PARITY = QUDA_INVALID_ENUM, QUDA_EVEN_PARITY = 0, QUDA_ODD_PARITY
 
 

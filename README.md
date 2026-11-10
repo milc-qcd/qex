@@ -35,6 +35,8 @@ Further examples:
 
 GPU gauge and fermion flow (Intel Max / NVIDIA H100): [compile and run guide](README_GPU.md).
 
+Optional QUDA inversion: [build, solver selection, and validation status](docs/QUDA_SOLVER.md).
+
 Directional HISQ flow with SYCL: [implementation and validation details](docs/HISQ_SYCL.md).
 
 Perlmutter A100 target: [MPI build setup and GPU validation job](docs/PERLMUTTER_SYCL.md).
