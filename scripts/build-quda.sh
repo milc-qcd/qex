@@ -14,12 +14,17 @@ mkdir -p "$DEP_ROOT"
 # A bounded compiler probe and the batch build may overlap; serialize them.
 exec 9>"$DEP_ROOT/build-$ARCH.lock"
 flock 9
-BUILD="$DEP_ROOT/build-$ARCH"
+BUILD=${QUDA_BUILD_DIR:-$DEP_ROOT/build-$ARCH}
 PREFIX=${QUDA_DIR:-$DEP_ROOT/$ARCH}
 CUDA_TOOLKIT=${CUDA_PATH:?Set CUDA_PATH to the CUDA toolkit}
 # Resolve the HPC SDK's bin/nvcc symlink: its parent CUDA wrapper directory
 # does not contain targets/, which CMake needs when linking compiler probes.
 CUDA_TOOLKIT=$(dirname -- "$(dirname -- "$(readlink -f "$CUDA_TOOLKIT/bin/nvcc")")")
+QUDA_CUDA_VERSION=$(awk '$1 == "#define" && $2 == "CUDA_VERSION" {print $3; exit}' "$CUDA_TOOLKIT/include/cuda.h")
+if [[ "$ARCH" == sm_90 && "$QUDA_CUDA_VERSION" -lt 12060 ]]; then
+  echo "This QUDA revision needs CUDA >= 12.6 for H100; select CUDA 12.8 on Stampede3." >&2
+  exit 2
+fi
 EXTRA_CMAKE=()
 if [[ -n "${QUDA_EIGEN_INCLUDE:-}" ]]; then
   EXTRA_CMAKE+=(-DQUDA_DOWNLOAD_EIGEN=OFF "-DEIGEN_INCLUDE_DIR=$QUDA_EIGEN_INCLUDE")
@@ -52,5 +57,7 @@ I_MPI_CC="$HOST_CC" I_MPI_CXX="$HOST_CXX" cmake -S "$SOURCE" -B "$BUILD" \
   -DQUDA_BUILD_SHAREDLIB=ON "${EXTRA_CMAKE[@]}"
 if [[ "${1:-}" == --configure-only ]]; then exit 0; fi
 cmake --build "$BUILD" --target quda --parallel "${BUILD_JOBS:-8}"
-cmake --install "$BUILD"
+# QUDA's top-level install also requests libquda_test even when tests are off.
+# The lib subdirectory installs the production library, headers, and CMake files.
+cmake --install "$BUILD/lib"
 printf 'QUDA revision: %s\nQUDA_DIR=%s\n' "$QUDA_REVISION" "$PREFIX"

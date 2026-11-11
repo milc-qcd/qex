@@ -6,17 +6,25 @@
 #SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=24
 #SBATCH --time=00:30:00
-#SBATCH --output=build-sycl/quda-h100-validation-%j.log
+#SBATCH --output=quda-h100-validation-%j.log
 # Require a successful build and prepared configuration-1000 inputs. One rank
 # per H100; run the small solver/flow tests before either full comparison.
 set -euo pipefail
-cd "${SLURM_SUBMIT_DIR:?}"
+# Submit from the test directory with QEX_REPO_ROOT pointing to the source tree.
+REPO=${QEX_REPO_ROOT:-${SLURM_SUBMIT_DIR:?}}
+cd "$REPO"
 REPO=$PWD
 source ./load-mpi-env.sh
 source ./scripts/load-nvidia-sycl-env.sh
 source ./scripts/load-quda-env.sh
-INPUT=${QEX_QUDA_VALIDATION_ROOT:?Set the prepared validation directory}
-BUILD_JOB=${QEX_QUDA_BUILD_JOB:?Set the QEX QUDA build job ID}
+INPUT=${QEX_QUDA_VALIDATION_ROOT:-${SLURM_SUBMIT_DIR:?}}
+INPUT=$(cd -- "$INPUT" && pwd)
+if [[ -n "${QEX_QUDA_BUILD_RECORD:-}" ]]; then
+  BUILD_RECORD=$QEX_QUDA_BUILD_RECORD
+else
+  BUILD_RECORD="$QEX_BUILD_ROOT/quda-build-records/${QEX_QUDA_BUILD_JOB:?Set QEX_QUDA_BUILD_RECORD to the completed local build record}"
+fi
+[[ "$(cat "$BUILD_RECORD/exit-status.txt")" == 0 ]]
 ATTEMPT="$INPUT/attempts/job_${SLURM_JOB_ID}"
 mkdir -p "$INPUT/attempts"
 mkdir "$ATTEMPT"
@@ -38,7 +46,7 @@ finish() {
 }
 trap finish EXIT
 trap 'exit 143' TERM
-sha256sum -c "$QEX_BUILD_ROOT/quda-build-records/$BUILD_JOB/binaries.sha256" > "$ATTEMPT/binary-integrity.log"
+(cd "$QEX_BUILD_ROOT" && sha256sum -c "$BUILD_RECORD/binaries.sha256") > "$ATTEMPT/binary-integrity.log"
 (cd "$INPUT" && sha256sum -c SHA256SUMS.inputs) > "$ATTEMPT/input-integrity.log"
 export ONEAPI_DEVICE_SELECTOR=cuda:gpu OMP_NUM_THREADS=2
 export I_MPI_FABRICS=shm I_MPI_HYDRA_BOOTSTRAP=fork I_MPI_PIN=1 I_MPI_PIN_DOMAIN=24
@@ -50,6 +58,8 @@ cp -p "$INPUT/compare-flow-output.py" "$ATTEMPT/"
 nvidia-smi --query-gpu=index,uuid,name,driver_version,memory.total --format=csv > "$ATTEMPT/nvidia-smi.txt"
 sycl-ls > "$ATTEMPT/devices.txt"
 "$QEX_BUILD_ROOT/SYCL-h100/check_cuda_device" H100 > "$ATTEMPT/device-preflight.log"
+# Keep numerical execution on the allocated node, including the CPU regression.
+ibrun -n 2 -o 0 "$QEX_BUILD_ROOT/CPU/check_hisq_gpu" -lat:8,8,8,8 > "$ATTEMPT/cpu-mpi2.log" 2>&1
 mpiexec -n 1 "$ATTEMPT/bin/check_quda_hisq" > "$ATTEMPT/single.log" 2>&1
 mpiexec -n 2 "$ATTEMPT/bin/check_quda_hisq" > "$ATTEMPT/mpi2.log" 2>&1
 grep -F 'PASS:' "$ATTEMPT/"{single,mpi2}.log

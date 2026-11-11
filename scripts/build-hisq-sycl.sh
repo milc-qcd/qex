@@ -56,6 +56,18 @@ if [[ -n "${QUDA_DIR:-}" && "$TARGET" != check_cuda_device ]]; then
   }
   BUILD="$BUILD-quda"
   EXTRA_FLAGS+=("-d:qudaDir:$QUDA_DIR" "-d:cudaLibDir:$QUDA_CUDA_LIB" -d:qexQudaCuda)
+  if [[ -n "${QUDA_GCC_TOOLCHAIN:-}" ]]; then
+    printf -v QUDA_GCC_OPTION '%q' "--gcc-toolchain=$QUDA_GCC_TOOLCHAIN"
+    EXTRA_FLAGS+=("--passC:$QUDA_GCC_OPTION" "--passL:$QUDA_GCC_OPTION")
+    printf -v QUDA_GCC_RPATH '%q' "-Wl,-rpath,$QUDA_GCC_TOOLCHAIN/lib64"
+    EXTRA_FLAGS+=("--passL:$QUDA_GCC_RPATH")
+  fi
+  # QUDA also uses NVML. Link its toolkit stub on login/CPU nodes; the
+  # actual driver library is resolved at runtime on the GPU node.
+  if [[ -f "$QUDA_CUDA_LIB/stubs/libnvidia-ml.so" ]]; then
+    printf -v QUDA_NVML_OPTION '%q' "-L$QUDA_CUDA_LIB/stubs"
+    EXTRA_FLAGS+=("--passL:$QUDA_NVML_OPTION -lnvidia-ml")
+  fi
   if [[ -n "${CUDA_MATH_LIB_DIR:-}" ]]; then
     EXTRA_FLAGS+=("-d:cudaMathLibDir:$CUDA_MATH_LIB_DIR")
   fi

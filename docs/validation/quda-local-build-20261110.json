@@ -1,0 +1,74 @@
+{
+  "recorded_utc": "2026-11-11T00:10:08.750893+00:00",
+  "recorded_chicago": "2026-11-10T18:10:08.751062-06:00",
+  "status": "local compilation and linking passed; direct H100 numerical validation submitted",
+  "quda_revision": "af7e15080e247795ef076b6d9284478755a9a683",
+  "toolchain": {
+    "cuda": "12.8",
+    "gcc": "13.2.0",
+    "sycl": "DPC++ 7.2.0 / clang 23.1.1",
+    "gpu_target": "sm_90",
+    "build_workers": 2
+  },
+  "completed": [
+    "QUDA production shared library compiled, linked, and installed locally",
+    "CPU hisqflow and check_hisq_gpu executables compiled and linked",
+    "CPU executable rejects unavailable QUDA and invalid solver names",
+    "QUDA/SYCL check_quda_hisq and hisqflow executables compiled and linked",
+    "H100 device preflight executable compiled and linked",
+    "CUDA 12.4 rejected by the early H100 version check",
+    "Frozen input hashes and original CPU reference hashes match",
+    "Frozen executable/library hashes match the successful build",
+    "Frozen executable resolves the frozen QUDA library and GCC 13 C++ runtime"
+  ],
+  "pending": [
+    "CPU two-rank coupled-flow regression inside the H100 allocation",
+    "H100 one/two-rank QUDA residual, propagator and subsequent coupled-flow tests",
+    "Full configuration 1000 gauge/correlator comparisons for CPU and QUDA inversions with SYCL flow",
+    "QUDA performance and GPU-memory measurements"
+  ],
+  "build_fixes": [
+    "Use CUDA 12.8 for this QUDA revision on H100; CUDA 12.4 failed in Hopper TMA helpers",
+    "Install the production lib subdirectory to avoid an unbuilt upstream test-helper install rule",
+    "Link the NVML toolkit stub on the login node without adding stub directories to runtime search paths",
+    "Select GCC 13 headers and C++ runtime for QEX/QUDA linking instead of clang default GCC 11"
+  ],
+  "h100_job": "3706002",
+  "state_at_submission": "PENDING",
+  "reason_at_submission": "Priority",
+  "dependencies": [],
+  "cancelled_jobs": [
+    "3705169",
+    "3705235",
+    "3705247"
+  ],
+  "submit_directory": "/work2/11599/mdai07/stampede3/test/hisqflow_directional_20261026/gpu-sycl-validation/015phys-cfg1000-20261110-quda-h100",
+  "slurm_log": "/work2/11599/mdai07/stampede3/test/hisqflow_directional_20261026/gpu-sycl-validation/015phys-cfg1000-20261110-quda-h100/quda-h100-validation-3706002.log",
+  "results_directory": "/work2/11599/mdai07/stampede3/test/hisqflow_directional_20261026/gpu-sycl-validation/015phys-cfg1000-20261110-quda-h100/attempts/job_3706002",
+  "build_record_directory": "/work2/11599/mdai07/stampede3/test/hisqflow_directional_20261026/gpu-sycl-validation/015phys-cfg1000-20261110-quda-h100/build/record",
+  "runtime": {
+    "mpi_ranks": 4,
+    "omp_threads_per_rank_full_run": 16,
+    "gpu_target": "H100 sm_90"
+  },
+  "binary_checksums": [
+    "a8d8d656b64c147382272ef6f36c26217b51a80fda7041744b1964d8d13c2581  SYCL-h100-quda/hisqflow",
+    "36340fc03b801bbc436794baeeaabb683b0bc5e45b6c7a51d8533aedf7b62061  SYCL-h100-quda/check_quda_hisq",
+    "d56092763f775f5572cfe6eb51c49626af76e1edaae12d32358df4b67a9bc339  SYCL-h100/check_cuda_device",
+    "012064c9e0e7277801a093dab22cd146fb0c18b9a20c41e17c3e9dd1f2085c44  CPU/hisqflow",
+    "cc373a8decd1547962f7760ca15e7ade6d5907211e3d71cdfa2d39ceae984af6  CPU/check_hisq_gpu",
+    "34fe49d7be62898fe5a9d87e6f4812b7c65f43a7c079cb6fc35d22a74d956182  quda/lib/libquda.so"
+  ],
+  "input_manifest_sha256": "ea403ccd76c7f5067bcf863c05d1625c3301afc6dd41211b0fc185c441fb189a",
+  "comparison": {
+    "rtol": 1e-08,
+    "atol": 1e-10,
+    "gauge_values": 1064,
+    "correlator_values": 9216
+  },
+  "notes": [
+    "GPU numerical correctness is not yet claimed.",
+    "Only libcuda.so.1 and libnvidia-ml.so.1 are unavailable on the login node; these are supplied by the GPU node.",
+    "The original flow-only H100 job 3699217 is unchanged."
+  ]
+}

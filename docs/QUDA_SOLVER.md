@@ -5,19 +5,20 @@ The application accepts **`--solver=qex`** (the default; `cpu` is an alias) or
 SYCL GPU. QUDA accelerates the initial HISQ inversion; measurements and I/O
 remain on the host.
 
-The QUDA integration is undergoing validation. As of November 10, 2026,
-the CPU application compiled and linked, and its unavailable/invalid solver
-checks passed. The QUDA-enabled application and dedicated test compiled all
-C++/SYCL objects for H100 with linking disabled. The QUDA library build, final
-application/test linking, and NVIDIA numerical checks are queued; a successful
-QUDA solve is **not yet claimed**. The previously validated
-flow-only executables remain separate.
+As of November 10, 2026, the QUDA library and the CPU/QUDA application and
+test executables compiled and linked successfully on the login node with two
+build workers. Solver-selection error checks passed. H100 numerical validation
+is submitted as job **3706002**, directly from the test directory with no
+build-job dependencies. A successful QUDA solve is **not yet claimed**.
+The previously validated flow-only executables remain separate.
 
 ## Build on Stampede3
 
 Use Nim, MPI, QMP/QIO, and the CUDA-enabled SYCL installation described in
 [README_GPU.md](../README_GPU.md). QUDA additionally needs CMake 3.25.2 or
-newer, a CUDA-capable host compiler, and Eigen headers. The build helper pins
+newer, a CUDA-capable host compiler, and Eigen headers. For H100, use CUDA
+12.6 or newer with this QUDA revision; CUDA 12.8 is installed on Stampede3.
+CUDA 12.4 failed to compile QUDA's Hopper tensor-memory descriptor helpers. The build helper pins
 [QUDA revision af7e15080e247795ef076b6d9284478755a9a683](https://github.com/lattice/quda/tree/af7e15080e247795ef076b6d9284478755a9a683).
 It builds a shared CUDA library with staggered operators, the MILC interface,
 and MPI communication. QMP and GPU-aware MPI are not required inside QUDA;
@@ -27,19 +28,27 @@ From a fresh shell in the repository root:
 
 ```bash
 source ./load-mpi-env.sh
+export CUDA_PATH=/home1/apps/nvidia/Linux_x86_64/25.3/cuda
+export QEX_BUILD_ROOT="$PWD/build-sycl/llvm-v7.2.0-cuda12.8"
 source ./scripts/load-nvidia-sycl-env.sh
-export SYCL_TARGET=h100
+export SYCL_TARGET=h100 BUILD_JOBS=2
+export QUDA_BUILD_DIR="$PWD/deps-quda/build-sm_90-cuda12.8"
 export QUDA_EIGEN_INCLUDE=/home1/apps/nvidia25/eigen/3.4.0/include/eigen3
-export QUDA_CUDA_MATH_ROOT=/home1/apps/nvidia/Linux_x86_64/24.5/math_libs
+export QUDA_CUDA_MATH_ROOT=/home1/apps/nvidia/Linux_x86_64/25.3/math_libs
 
-# Configure/download dependencies on the login node; compile on a CPU allocation.
-./scripts/build-quda.sh --configure-only
-sbatch -A YOUR_ACCOUNT scripts/build-quda-stampede3.sbatch
+# Build with two concurrent compiler processes on the login node.
+nice -n 10 ./scripts/build-quda.sh
 ```
 
-Alternatively, inside a suitable CPU allocation, run
-`BUILD_JOBS=8 ./scripts/build-quda.sh`. The default source/build/install locations
-are `deps-quda/source`, `deps-quda/build-sm_90`, and `deps-quda/sm_90`.
+Compilation needs a CPU and the toolkit, not a physical GPU. `BUILD_JOBS`
+limits compiler concurrency only; it does not limit runtime MPI/OpenMP/GPU
+parallelism. [TACC permits compilation on login nodes with limited concurrency](https://docs.tacc.utexas.edu/basics/conduct/).
+For more build workers, use a CPU allocation or the optional
+`scripts/build-quda-stampede3.sbatch` builder.
+
+The source/build/install locations in this example are `deps-quda/source`,
+`deps-quda/build-sm_90-cuda12.8`, and `deps-quda/sm_90`. Without
+`QUDA_BUILD_DIR`, the build directory defaults to `deps-quda/build-sm_90`.
 `QEX_QUDA_ROOT`, `QUDA_DIR`, `QUDA_HOST_CC`, and `QUDA_HOST_CXX` can override
 those choices. With `SYCL_TARGET=a100`, the helper uses `sm_80` and separate
 build/install directories. A100/Perlmutter execution is not validated here.
@@ -49,22 +58,24 @@ the actual `nvcc` path and accepts `QUDA_CUDA_MATH_ROOT` for CMake discovery.
 For a normal, combined CUDA installation, that override can be omitted. If
 `QUDA_EIGEN_INCLUDE` is unset, QUDA downloads its configured Eigen dependency.
 The source checkout must match the pinned revision and have no local changes.
+The helper installs from QUDA's `lib` build directory, which includes the
+production library, headers, and CMake package. This avoids an upstream
+install rule that requests an unbuilt test-helper library even with tests off.
 
 After the library build completes, load its environment and compile the QEX
 application and dedicated test:
 
 ```bash
+export QEX_QUDA_BUILD_RECORD="$QEX_BUILD_ROOT/quda-build-records/local-build"
+nice -n 10 ./scripts/build-quda-flow.sh
 source ./scripts/load-quda-env.sh
-./scripts/build-hisq-sycl.sh SYCL check_cuda_device
-./scripts/build-hisq-sycl.sh SYCL check_quda_hisq
-./scripts/build-hisq-sycl.sh SYCL hisqflow
 ```
 
 The new executables are:
 
 ```text
-build-sycl/llvm-v7.2.0/SYCL-h100-quda/hisqflow
-build-sycl/llvm-v7.2.0/SYCL-h100-quda/check_quda_hisq
+build-sycl/llvm-v7.2.0-cuda12.8/SYCL-h100-quda/hisqflow
+build-sycl/llvm-v7.2.0-cuda12.8/SYCL-h100-quda/check_quda_hisq
 ```
 
 Setting `QUDA_DIR` enables QUDA support and gives the binaries/caches a `-quda`
@@ -73,13 +84,35 @@ preflight remains in `SYCL-h100/check_cuda_device` because it does not use QUDA.
 The build script supplies `qudaDir`, `cudaLibDir`, and `cudaMathLibDir` Nim
 settings and the CUDA/SYCL interoperability definitions. `CUDA_LIB_DIR` and
 `CUDA_MATH_LIB_DIR` select runtime library locations; load the same environment
-when executing the result.
+when executing the result. The linker uses CUDA driver/NVML toolkit stubs on
+CPU/login nodes; those stub directories are not added to the runtime search
+path. The actual NVIDIA driver libraries are supplied by the GPU node.
+`load-quda-env.sh` selects `QUDA_GCC_TOOLCHAIN=/opt/apps/gcc/13.2.0` so the
+SYCL compiler uses the same C++ headers and runtime as the QUDA build;
+otherwise clang selects system GCC 11 and cannot link QUDA's GCC 13 symbols.
+Override that prefix when using a different GCC installation.
 
-The combined batch builder
-[scripts/build-quda-flow-stampede3.sbatch](../scripts/build-quda-flow-stampede3.sbatch)
-performs CPU regression/error-path checks and builds the QUDA application and
-test. Submit it with `--dependency=afterok:LIBRARY_JOB_ID` after submitting the
-library build. Only the library-build job needs to download/configure QUDA.
+The local builder compiles the CPU reference, CUDA device preflight, QUDA
+application, and dedicated test. It checks solver-selection error paths,
+records executable/library hashes, and writes `exit-status.txt`. Numerical
+CPU and GPU tests run in the subsequent H100 allocation. The optional batch
+builder runs the same compiler helper with `--run-cpu-tests` inside an
+allocation.
+
+To submit directly from a prepared test directory after a successful build:
+
+```bash
+export QEX_REPO_ROOT="$PWD"
+export QEX_QUDA_VALIDATION_ROOT=/absolute/path/to/prepared-test-directory
+export QUDA_DIR="$QEX_REPO_ROOT/deps-quda/sm_90"
+cd "$QEX_QUDA_VALIDATION_ROOT"
+sbatch "$QEX_REPO_ROOT/scripts/validate-quda-h100-stampede3.sbatch"
+```
+
+Keep the `QEX_BUILD_ROOT`, `QEX_QUDA_BUILD_RECORD`, and CUDA environment from
+the build. There are no Slurm build-job dependencies. The job verifies the
+completed build record and checksums before running. Its Slurm log is written
+to the submit directory as `quda-h100-validation-JOBID.log`.
 
 ## Select the solver at runtime
 
@@ -151,16 +184,19 @@ mpiexec -n 1 "$QEX_BUILD_ROOT/SYCL-h100-quda/check_quda_hisq"
 mpiexec -n 2 "$QEX_BUILD_ROOT/SYCL-h100-quda/check_quda_hisq"
 ```
 
-## Submitted validation chain
+## Validation submission
 
-The [recorded validation status](validation/quda-integration-20261110.json)
+The [recorded validation status](validation/quda-local-build-20261110.json)
 distinguishes completed compilation checks from pending runtime tests.
 
-| Stage | Job | Status when recorded |
+| Stage | Location / job | Status when recorded |
 | --- | --- | --- |
-| Pinned H100 QUDA library build | 3705169 | Pending for priority |
-| QEX CPU regression and QUDA application/test builds | 3705235 | Depends on successful library build |
-| H100 numerical tests and full configuration 1000 comparisons | 3705247 | Depends on successful QEX build |
+| QUDA library and QEX application/test build | Login node, two workers | Completed |
+| H100 numerical tests and full configuration 1000 comparisons | 3706002 | Pending for priority; no dependencies |
+
+The earlier dependency chain, jobs 3705169, 3705235, and 3705247, was cancelled.
+The direct submission uses the frozen `build/` payload and `run.sbatch` in the
+test directory below. Its Slurm log is `quda-h100-validation-3706002.log`.
 
 The final job first requires the small one/two-rank tests to pass. It then
 runs configuration 1000 twice using the same executable and four-rank layout:
@@ -177,9 +213,10 @@ Prepared inputs and future results are under:
 /work2/11599/mdai07/stampede3/test/hisqflow_directional_20261026/gpu-sycl-validation/015phys-cfg1000-20261110-quda-h100
 ```
 
-The full-validation batch script requires this prepared directory via
-`QEX_QUDA_VALIDATION_ROOT` and the application-build job ID via
-`QEX_QUDA_BUILD_JOB`. It validates the build's binary checksums and the input
-manifest before execution. New attempts go under `attempts/job_JOBID/`, with
+The full-validation batch script accepts this directory as its submit
+directory, `QEX_REPO_ROOT` for the source-tree location, and
+`QEX_QUDA_BUILD_RECORD` for the completed local build record. It validates the
+build's binary checksums and the input manifest before execution. The older
+`QEX_QUDA_BUILD_JOB` selector remains available for optional batch builds. New attempts go under `attempts/job_JOBID/`, with
 separate `qex/` and `quda/` result directories. This does not modify the original
 flow-only H100 job 3699217 or its frozen inputs.
