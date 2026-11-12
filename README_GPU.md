@@ -234,6 +234,36 @@ A generic filename such as `config` does not supply the required mass fields.
 `--contract-json` is currently unused; source and observable choices remain
 in `src/alphas/hisqflow.nim`.
 
+### Source position and reproducibility
+
+Each run draws one time slice from `0..Nt-1` and one spatial corner from
+`0..7`, then performs three separate color inversions on that corner wall.
+The corner is `x_parity + 2*y_parity + 4*z_parity`. All MPI ranks use the
+same two draws, and the same source is retained throughout the flow.
+
+Pass `--seed=12345` to reproduce the draws. The default is a clock-derived
+uint32 seed on rank 0. QEX's collective RNG seeding synchronizes the random
+stream; the draws use rejection sampling to avoid modulo bias. Either draw
+can be pinned with `--source-time=T` or `--source-corner=C`; pinning one
+keeps the other draw unchanged. `--source-time=0 --source-corner=0` selects
+the original source position. Use the same seed/overrides for CPU and QUDA
+comparisons and distinct seeds when independent configuration samples are wanted.
+
+Before inversion, rank 0 writes
+`correlator_LABEL_CONFIGURATION.source.json` in the output directory.
+It records the seed, selected time/corner, corner origin, override flags,
+gauge filename, lattice geometry, mass, solver, and source normalization.
+Without `--output`, the record is `source_LABEL_CONFIGURATION.json` in the
+working directory. An existing source record is preserved: choose a fresh
+output directory for another run.
+
+All correlator arrays are indexed by `dt = (sink time - source time + Nt) mod Nt`.
+Local staggered phases use the actual source origin. The thin-link A0P
+insertion now includes the antiperiodic temporal-boundary sign once, matching
+the already-phased HISQ links. Historical fixed-origin references need that
+thin-link sign correction on the last time bin; the QUDA validation script
+handles this explicitly while retaining the original reference data.
+
 ## 6. Run the full flow with Slurm on Stampede3
 
 Save the following as `run-gpu.sbatch` in the repository root. Replace

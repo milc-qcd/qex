@@ -125,7 +125,7 @@ mkdir -p "$QUDA_RESOURCE_PATH"
 
 # Match the MPI count to rank-geometry in the supplied lattice JSON.
 ibrun "$QEX_BUILD_ROOT/SYCL-h100-quda/hisqflow" \
-  --solver=quda \
+  --solver=quda --seed=12345 \
   --flow-json=/absolute/path/to/flow-test.json \
   --lattice-json=/absolute/path/to/lattice.json \
   --configuration=1000 \
@@ -134,7 +134,11 @@ ibrun "$QEX_BUILD_ROOT/SYCL-h100-quda/hisqflow" \
 ```
 
 Use `--solver=qex` with the same executable and inputs to select the CPU solve.
-There is no recompile between these choices. A binary built without `QUDA_DIR`
+There is no recompile between these choices. Source selection is shared by
+both solvers; use the same `--seed`, `--source-time`, and `--source-corner`
+when comparing them. The source record and source-relative time convention
+are described in [the GPU guide](../README_GPU.md#source-position-and-reproducibility).
+A binary built without `QUDA_DIR`
 rejects `--solver=quda` before loading the configuration. Invalid solver names
 are also rejected. The application explicitly selects QEX by default, even
 though QEX's general solver-parameter defaults select QUDA when it is linked.

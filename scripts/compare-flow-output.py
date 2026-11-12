@@ -54,6 +54,8 @@ def main():
     parser.add_argument("--label", default="C0p0")
     parser.add_argument("--rtol", type=float, default=1e-8)
     parser.add_argument("--atol", type=float, default=1e-10)
+    parser.add_argument("--legacy-thin-boundary", action="store_true",
+                        help="correct the last thin-A0P reference bin from the pre-random-source fixed-origin format")
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--csv", required=True, type=Path)
     args = parser.parse_args()
@@ -67,12 +69,24 @@ def main():
         "criterion": "abs(candidate-reference) <= atol + rtol*abs(reference), for every value",
         "files": {}, "passed": True,
     }
+    if args.legacy_thin_boundary:
+        source_name = f"correlator_{args.label}_{args.configuration}.source.json"
+        if (args.reference / source_name).exists():
+            parser.error("legacy correction requires a reference predating source metadata")
+        metadata = json.loads((args.candidate / source_name).read_text())
+        if metadata["source-time"] != 0 or metadata["source-corner"] != 0:
+            parser.error("legacy correction requires the candidate source at time 0, corner 0")
+        report["reference_transformation"] = "negate last bin of A0P_thin_re_ss and A0P_thin_im_ss; original reference file remains unchanged"
     summaries = []
     for kind in ("gaugeobs", "correlator"):
         name = f"{kind}_{args.label}_{args.configuration}"
         old_path, new_path = args.reference / name, args.candidate / name
         try:
             old, new = json.loads(old_path.read_text()), json.loads(new_path.read_text())
+            if kind == "correlator" and args.legacy_thin_boundary:
+                for channels_at_time in old.values():
+                    for channel in ("A0P_thin_re_ss", "A0P_thin_im_ss"):
+                        channels_at_time[channel][-1] *= -1
             rows, channels, times = [], {}, {}
             for path, reference, candidate in leaves(old, new):
                 difference = abs(candidate - reference)

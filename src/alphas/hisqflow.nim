@@ -30,6 +30,23 @@ const Corners = 1
 const Masses = 1
 const nsrcTime = 1
 
+proc drawSourceIndex(rng: var RngMilc6; extent: int): int =
+  ## Uniform integer without modulo bias. The scalar stream is rank independent.
+  if extent <= 0 or extent > rng.numInts:
+    qexError "source extent is outside the RNG integer range"
+  let limit = rng.numInts - (rng.numInts mod extent)
+  while true:
+    let value = rng.integer
+    if value < limit:
+      return value mod extent
+
+proc sourceRelative(values: seq[float]; sourceTime: int): seq[float] =
+  ## Keep every output channel indexed by dt = (sink time - source time) mod Nt.
+  result = newSeq[float](values.len)
+  for dt in 0..<values.len:
+    result[dt] = values[(sourceTime + dt) mod values.len]
+
+
 #[ IO ]#
 
 proc readGauge(u: auto; fn: string) =
@@ -199,10 +216,80 @@ let
   # nhyp = HypCoefs(alpha1: 0.4, alpha2: 0.5, alpha3: 0.5)
   hisq = newHisq(0.0,1.0) 
   hisq2 = newHisq(0.0,0.0)
-    # source time
-  srcT = 0
     # time extent
-  nt = latInfo["lattice-geometry"].getIntSeq[^1]
+  nt = latLayout[^1]
+
+# One corner wall per configuration, with separate inversions for all colors.
+# Use sourceTime: Nim treats srcT and the legacy srct slot index as one name.
+# A recorded clock seed is the default; --seed reproduces the same geometry.
+# --source-time and --source-corner can pin either draw for controlled checks.
+# Example additions to the normal command: --seed:12345
+# Reproduce the old source position: --source-time:0 --source-corner:0
+if latLayout.len != 4 or latLayout.anyIt(it <= 0 or (it and 1) != 0):
+  qexError "corner walls require four positive even lattice extents"
+for option in ["seed", "source-time", "source-corner"]:
+  if cmd.hasKey(option) and cmd[option].kind != JInt:
+    qexError "--" & option & " requires an integer"
+var sourceSeed: uint64
+if cmd.hasKey("seed"):
+  let value = cmd["seed"].getInt()
+  if value < 0 or value.uint64 > high(uint32).uint64:
+    qexError "--seed must be an integer in 0..4294967295"
+  sourceSeed = value.uint64
+elif myRank == 0:
+  sourceSeed = uint64(epochTime() * 1e6) and high(uint32).uint64
+var sourceRng: RngMilc6
+# Collective seed() broadcasts rank 0's seed internally. Only rank 0 records
+# sourceSeed; every rank draws from the same initialized scalar stream.
+sourceRng.seed(sourceSeed, 0)
+# Always consume both draws, so overriding one does not change the other.
+let drawnTime = drawSourceIndex(sourceRng, nt)
+let drawnCorner = drawSourceIndex(sourceRng, 8)
+let
+  sourceTime = if cmd.hasKey("source-time"): cmd["source-time"].getInt() else: drawnTime
+  srcCorner = if cmd.hasKey("source-corner"): cmd["source-corner"].getInt() else: drawnCorner
+if sourceTime < 0 or sourceTime >= nt:
+  qexError "--source-time must be in 0..<Nt"
+if srcCorner < 0 or srcCorner >= 8:
+  qexError "--source-corner must be in 0..7 (x + 2*y + 4*z)"
+let sourceOrigin = [px(srcCorner), py(srcCorner), pz(srcCorner), sourceTime]
+# Persist the choice before inversion, including if a later stage fails.
+# Physical coordinates never replace the zero-based propagator slot indices.
+let sourceRecord = if corrFile != "__NOOUTPUT__": corrFile & ".source.json"
+                   else: "source_" & flowname & "_" & cfg & ".json"
+if myRank == 0:
+  let sourceMetadata = %* {
+    "source": "color-diluted corner wall",
+    "seed": sourceSeed,
+    "source-time": sourceTime,
+    "source-corner": srcCorner,
+    "source-origin": sourceOrigin,
+    "source-time-fixed": cmd.hasKey("source-time"),
+    "source-corner-fixed": cmd.hasKey("source-corner"),
+    "source-time-range": [0, nt-1],
+    "source-corner-range": [0, 7],
+    "source-draw": "RngMilc6 stream 0; uniform rejection sampling; time then corner",
+    "lattice-geometry": latLayout,
+    "configuration": cfg,
+    "gauge-file": filename & "." & cfg & ".ildg",
+    "mass": mass,
+    "solver": (if solverBackend == sbQuda: "quda" else: "qex"),
+    "source-times": 1,
+    "source-corners": 1,
+    "source-colors": 3,
+    "source-norm2-per-color": lo.physVol div (nt * 8),
+    "time-index": "dt = (sink time - source time + Nt) mod Nt",
+    "A0P-time-location": "forward current at dt + 1/2",
+    "normalization": "legacy color-summed corner-wall normalization"
+  }
+  echo "Corner-wall source: seed=", sourceSeed, " time=", sourceTime,
+      " corner=", srcCorner, " origin=", sourceOrigin
+  let sourceDirectory = parentDir(sourceRecord)
+  if sourceDirectory.len > 0: createDir(sourceDirectory)
+  if fileExists(sourceRecord):
+    qexError "source record already exists; use a new output directory: " & sourceRecord
+  writeFile(sourceRecord, pretty(sourceMetadata) & "\n")
+
 threads:
   block:
     let d = u.checkSU
@@ -331,11 +418,16 @@ block:
           src := 0
           threadBarrier()
           for i in src.sites:
-            if cc[3][i] == srct and
-              (cc[0][i] and 1) == px(corner) and
-              (cc[1][i] and 1) == py(corner) and
-              (cc[2][i] and 1) == pz(corner):
+            if cc[3][i].int == sourceTime and
+              (cc[0][i].int and 1) == px(srcCorner xor corner) and
+              (cc[1][i].int and 1) == py(srcCorner xor corner) and
+              (cc[2][i].int and 1) == pz(srcCorner xor corner):
               src{i}[color] := 1.0
+        let sourceNorm2 = src.norm2
+        let expectedNorm2 = float(lo.physVol div (nt * 8))
+        if sourceNorm2 != expectedNorm2:
+          qexError "corner-wall source norm is inconsistent with its support"
+        echo "Corner-wall color=", color, " norm2=", sourceNorm2
       # invert D to get propagator
         for massIdx in 0..<Masses:
           threads: props[color][srct][corner][massIdx] := 0
@@ -383,7 +475,8 @@ if corrFile != "__NOOUTPUT__":
           # echo "forward ", forward, "term.delta ", term.delta
           let 
             backward = shiftIdx(forward, term.delta)
-            base = [px(forward), py(forward), pz(forward), srcT]
+            base = [px(srcCorner xor forward), py(srcCorner xor forward),
+                pz(srcCorner xor forward), sourceTime]
           # echo "forward ", forward, " backward ", backward
           var tmp = lo.ColorVector()
   
@@ -406,25 +499,36 @@ if corrFile != "__NOOUTPUT__":
     qexLog "HISQ gauge smearing for time-split correlators done at tau=",
         tauStr, ". Time: ", getElapsedTime()
 
+    # su/sul already include APBC. Add it once to the unphased thin link.
+    var thinTemporal = lo.ColorMatrix()
+    threads:
+      thinTemporal := u[3]
+      for i in thinTemporal.sites:
+        if lo.coords[3][i].int == nt-1:
+          thinTemporal{i} *= -1
+
     for propindex in 0..<mprops.len:
       for pionIdx in 0..<mesons.len:
         let combinedName = mesonname[pionIdx] & "_" & massname[propindex]
-        corrJSON["0.00"][combinedName] = %* corrs[propindex][pionIdx]
+        corrJSON["0.00"][combinedName] = %* sourceRelative(corrs[propindex][pionIdx], sourceTime)
 
+      # The A0-P helpers use stored source slot 0, independent of the sampled
+      # position. For this local P source their contraction is -S^dagger U S+;
+      # its source phases cancel. Physical time enters sourceRelative below.
       for nltindex in 0..<nltcorrList.len: 
         let
           flavor = @[mprops[propindex][0], mprops[propindex][1],
               mprops[propindex][0], mprops[propindex][1]]
-          thinRe = u[3].buildMesonCorrelator(nltcorrList[nltindex][0],
+          thinRe = thinTemporal.buildMesonCorrelator(nltcorrList[nltindex][0],
               nltcorrList[nltindex][1], props, [0, 0], flavor, true, true)
-          thinIm = u[3].buildMesonCorrelator(nltcorrList[nltindex][0],
+          thinIm = thinTemporal.buildMesonCorrelator(nltcorrList[nltindex][0],
               nltcorrList[nltindex][1], props, [0, 0], flavor, true, false)
           consRe = buildConservedA0PCorrelator(u, fu, ful, props, flavor, true)
           consIm = buildConservedA0PCorrelator(u, fu, ful, props, flavor, false)
-        corrJSON[tauStr]["A0P_thin_re_" & massname[propindex]] = %* thinRe
-        corrJSON[tauStr]["A0P_thin_im_" & massname[propindex]] = %* thinIm
-        corrJSON[tauStr]["cA0P_re_" & massname[propindex]] = %* consRe
-        corrJSON[tauStr]["cA0P_im_" & massname[propindex]] = %* consIm
+        corrJSON[tauStr]["A0P_thin_re_" & massname[propindex]] = %* sourceRelative(thinRe, sourceTime)
+        corrJSON[tauStr]["A0P_thin_im_" & massname[propindex]] = %* sourceRelative(thinIm, sourceTime)
+        corrJSON[tauStr]["cA0P_re_" & massname[propindex]] = %* sourceRelative(consRe, sourceTime)
+        corrJSON[tauStr]["cA0P_im_" & massname[propindex]] = %* sourceRelative(consIm, sourceTime)
 
   qexGC("after measuring thin and conserved correlators at tau=0.00")
 
@@ -447,10 +551,10 @@ if corrFile != "__NOOUTPUT__":
               nltcorrList[nltindex][1], props, [0, 0], flavor, true, true)
           hisqIm = fu2[3].buildMesonCorrelator(nltcorrList[nltindex][0],
               nltcorrList[nltindex][1], props, [0, 0], flavor, true, false)
-        corrJSON[tauStr]["A0P_hisq_re_" & massname[propindex]] = %* hisqRe
-        corrJSON[tauStr]["A0P_hisq_im_" & massname[propindex]] = %* hisqIm
-        corrJSON[tauStr]["A0P_re_" & massname[propindex]] = %* hisqRe
-        corrJSON[tauStr]["A0P_im_" & massname[propindex]] = %* hisqIm
+        corrJSON[tauStr]["A0P_hisq_re_" & massname[propindex]] = %* sourceRelative(hisqRe, sourceTime)
+        corrJSON[tauStr]["A0P_hisq_im_" & massname[propindex]] = %* sourceRelative(hisqIm, sourceTime)
+        corrJSON[tauStr]["A0P_re_" & massname[propindex]] = %* sourceRelative(hisqRe, sourceTime)
+        corrJSON[tauStr]["A0P_im_" & massname[propindex]] = %* sourceRelative(hisqIm, sourceTime)
 
   qexGC("after measuring correlators at tau=0.00")
   
@@ -484,7 +588,8 @@ u.staggeredFlow(props,flowMass,flowInfo):
             for forward in 0..<Corners:
               let 
                 backward = shiftIdx(forward, term.delta)
-                base = [px(forward), py(forward), pz(forward), srcT]
+                base = [px(srcCorner xor forward), py(srcCorner xor forward),
+                    pz(srcCorner xor forward), sourceTime]
               var tmp = lo.ColorVector()
       
               # Build shifted + rephased copy of `props[backward]`.
@@ -508,10 +613,17 @@ u.staggeredFlow(props,flowMass,flowInfo):
         qexLog "HISQ gauge smearing for time-split correlators done at tau=",
             tauStr, ". Time: ", getElapsedTime()
         
+        var thinTemporal = lo.ColorMatrix()
+        threads:
+          thinTemporal := u[3]
+          for i in thinTemporal.sites:
+            if lo.coords[3][i].int == nt-1:
+              thinTemporal{i} *= -1
+
         for propindex in 0..<mprops.len:
           for pionIdx in 0..<mesons.len:
             let combinedName = mesonname[pionIdx] & "_" & massname[propindex]
-            corrJSON[tauStr][combinedName] = %* corrs[propindex][pionIdx]
+            corrJSON[tauStr][combinedName] = %* sourceRelative(corrs[propindex][pionIdx], sourceTime)
         
           for nltindex in 0..<nltcorrList.len:
             # A0P with the thin link, HISQ smeared one-link, and full conserved
@@ -519,17 +631,17 @@ u.staggeredFlow(props,flowMass,flowInfo):
             let
               flavor = @[mprops[propindex][0], mprops[propindex][1],
                   mprops[propindex][0], mprops[propindex][1]]
-              thinRe = u[3].buildMesonCorrelator(nltcorrList[nltindex][0],
+              thinRe = thinTemporal.buildMesonCorrelator(nltcorrList[nltindex][0],
                   nltcorrList[nltindex][1], props, [0, 0], flavor, true, true)
-              thinIm = u[3].buildMesonCorrelator(nltcorrList[nltindex][0],
+              thinIm = thinTemporal.buildMesonCorrelator(nltcorrList[nltindex][0],
                   nltcorrList[nltindex][1], props, [0, 0], flavor, true, false)
               consRe = buildConservedA0PCorrelator(u, fu, ful, props, flavor, true)
               consIm = buildConservedA0PCorrelator(u, fu, ful, props, flavor, false)
-            corrJSON[tauStr]["A0P_thin_re_" & massname[propindex]] = %* thinRe
-            corrJSON[tauStr]["A0P_thin_im_" & massname[propindex]] = %* thinIm
+            corrJSON[tauStr]["A0P_thin_re_" & massname[propindex]] = %* sourceRelative(thinRe, sourceTime)
+            corrJSON[tauStr]["A0P_thin_im_" & massname[propindex]] = %* sourceRelative(thinIm, sourceTime)
 
-            corrJSON[tauStr]["cA0P_re_" & massname[propindex]] = %* consRe
-            corrJSON[tauStr]["cA0P_im_" & massname[propindex]] = %* consIm
+            corrJSON[tauStr]["cA0P_re_" & massname[propindex]] = %* sourceRelative(consRe, sourceTime)
+            corrJSON[tauStr]["cA0P_im_" & massname[propindex]] = %* sourceRelative(consIm, sourceTime)
             
       qexGC("after measuring correlators at tau=" & tauStr)
       block:
@@ -544,7 +656,7 @@ u.staggeredFlow(props,flowMass,flowInfo):
         for propindex in 0..<mprops.len:
           # for pionIdx in 0..<mesons.len:
           #   let combinedName = mesonname[pionIdx] & "_" & massname[propindex]
-          #   corrJSON[tauStr][combinedName] = %* corrs[propindex][pionIdx]
+          #   corrJSON[tauStr][combinedName] = %* sourceRelative(corrs[propindex][pionIdx], sourceTime)
         
           for nltindex in 0..<nltcorrList.len:
             # A0P with the thin link, HISQ smeared one-link, and full conserved
@@ -557,16 +669,17 @@ u.staggeredFlow(props,flowMass,flowInfo):
               hisqIm = fu2[3].buildMesonCorrelator(nltcorrList[nltindex][0],
                   nltcorrList[nltindex][1], props, [0, 0], flavor, true, false)
 
-            corrJSON[tauStr]["A0P_hisq_re_" & massname[propindex]] = %* hisqRe
-            corrJSON[tauStr]["A0P_hisq_im_" & massname[propindex]] = %* hisqIm
-            corrJSON[tauStr]["A0P_re_" & massname[propindex]] = %* hisqRe
-            corrJSON[tauStr]["A0P_im_" & massname[propindex]] = %* hisqIm
+            corrJSON[tauStr]["A0P_hisq_re_" & massname[propindex]] = %* sourceRelative(hisqRe, sourceTime)
+            corrJSON[tauStr]["A0P_hisq_im_" & massname[propindex]] = %* sourceRelative(hisqIm, sourceTime)
+            corrJSON[tauStr]["A0P_re_" & massname[propindex]] = %* sourceRelative(hisqRe, sourceTime)
+            corrJSON[tauStr]["A0P_im_" & massname[propindex]] = %* sourceRelative(hisqIm, sourceTime)
 
 echo "Saving correlators and gauge observables"
-let gfobsStr = pretty(gfobsJSON)
-let corrStr = pretty(corrJSON)
-writeFile(gfobsFile, gfobsStr)
-writeFile(corrFile, corrStr)
+if myRank == 0:
+  if gfobsFile != "__NOOUTPUT__":
+    writeFile(gfobsFile, pretty(gfobsJSON))
+  if corrFile != "__NOOUTPUT__":
+    writeFile(corrFile, pretty(corrJSON))
 
 
 qexFinalize()

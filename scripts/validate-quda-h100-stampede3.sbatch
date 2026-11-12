@@ -54,7 +54,7 @@ export OMP_PROC_BIND=spread OMP_PLACES=cores SLURM_CPU_BIND=cores
 export QUDA_RESOURCE_PATH="$ATTEMPT/tuning"
 mkdir -p "$QUDA_RESOURCE_PATH" "$ATTEMPT/bin"
 cp -p "$QEX_BUILD_ROOT/SYCL-h100-quda/"{hisqflow,check_quda_hisq} "$ATTEMPT/bin/"
-cp -p "$INPUT/compare-flow-output.py" "$ATTEMPT/"
+cp -p "$REPO/scripts/compare-flow-output.py" "$ATTEMPT/"
 nvidia-smi --query-gpu=index,uuid,name,driver_version,memory.total --format=csv > "$ATTEMPT/nvidia-smi.txt"
 sycl-ls > "$ATTEMPT/devices.txt"
 "$QEX_BUILD_ROOT/SYCL-h100/check_cuda_device" H100 > "$ATTEMPT/device-preflight.log"
@@ -65,6 +65,19 @@ mpiexec -n 2 "$ATTEMPT/bin/check_quda_hisq" > "$ATTEMPT/mpi2.log" 2>&1
 grep -F 'PASS:' "$ATTEMPT/"{single,mpi2}.log
 export OMP_NUM_THREADS=16
 GAUGE_STEM=/scratch/11599/mdai07/lat015phys/l3248f211b580m002426m06730m8447a
+# Historical configuration-1000 references use the fixed source at (0,0,0,0).
+# Both solvers must use that same source; default clock seeds would differ.
+REFERENCE_FLAGS=()
+if [[ ! -f "$INPUT/reference/correlator_C0p0_1000.source.json" ]]; then
+  REFERENCE_FLAGS+=(--legacy-thin-boundary)
+else
+  /usr/bin/python3 -I - "$INPUT/reference/correlator_C0p0_1000.source.json" <<'PYREF'
+import json, sys
+from pathlib import Path
+record = json.loads(Path(sys.argv[1]).read_text())
+assert record["source-time"] == record["source-corner"] == 0, "this fixed-origin validation requires a matching reference"
+PYREF
+fi
 for solver in qex quda; do
   OUT="$ATTEMPT/$solver"
   mkdir "$OUT"
@@ -73,7 +86,8 @@ for solver in qex quda; do
     > "$OUT/gpu-telemetry.csv" 2> "$OUT/gpu-telemetry.err" &
   MONITOR=$!
   /usr/bin/time -v -o "$OUT/resource-usage.txt" \
-    ibrun "$ATTEMPT/bin/hisqflow" --solver="$solver" \
+    ibrun "$ATTEMPT/bin/hisqflow" --solver="$solver" --seed=12345 \
+      --source-time=0 --source-corner=0 \
       --flow-json="$OUT/flow-test.json" --lattice-json="$OUT/lattice-015phys.json" \
       --configuration=1000 --base-filename="$GAUGE_STEM" --output="$OUT" \
     > "$OUT/run.log" 2>&1
@@ -82,7 +96,7 @@ for solver in qex quda; do
   grep -F "HISQ solver backend: $solver" "$OUT/run.log"
   python3 "$OUT/validate_output.py" 015phys 1000 > "$OUT/completeness.log"
   python3 "$ATTEMPT/compare-flow-output.py" --reference "$INPUT/reference" --candidate "$OUT" \
-    --configuration 1000 --rtol 1e-8 --atol 1e-10 \
+    --configuration 1000 --rtol 1e-8 --atol 1e-10 "${REFERENCE_FLAGS[@]}" \
     --report "$OUT/comparison.json" --csv "$OUT/comparison.csv" | tee "$OUT/comparison.log"
 done
 python3 "$ATTEMPT/compare-flow-output.py" --reference "$ATTEMPT/qex" --candidate "$ATTEMPT/quda" \
