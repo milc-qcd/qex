@@ -1,0 +1,9 @@
+{
+  "options": [
+    "--source=corner-wall",
+    "--sources=2",
+    "--seed=2",
+    "--source-times=[7,0]"
+  ],
+  "gauge_sha256": "d772f9c551b3f26697db788ce5b077c873a0abed451faeabf37c5b154cd43bf8"
+}

@@ -1,0 +1,40 @@
+{
+  "prepared": "2026-11-18T14:33:46.570904-06:00",
+  "gpu_implementation_commit": "80cec59c4097a32e8086e13750a6b2f5331c1c87",
+  "cpu_production_job": 3732213,
+  "cpu_production_status": "passed",
+  "reference_files": 51,
+  "reference_manifest_sha256": "d8a27b6e7c6687d317d3168b154d7305d21efaa777a3e8a91b088af3292a949b",
+  "packaged_small_suite": {
+    "status": "passed",
+    "backend": "CPU",
+    "solver": "qex",
+    "checks": 79,
+    "max_CPU_correlator_absolute_difference": 6.394884621840902e-13,
+    "timing_reports": 13,
+    "max_timing_accounting_error_seconds": 1.7763568394002505e-15
+  },
+  "comparator_fault_injection_tests": {
+    "status": "passed",
+    "tests": 9,
+    "uses_synthetic_timer_fixtures": true
+  },
+  "production_plan": {
+    "status": "prepared and verified, not executed",
+    "gauge_SHA256_verified": true,
+    "rank_geometry": [
+      2,
+      2,
+      2,
+      2
+    ],
+    "launcher": [
+      "srun",
+      "-n",
+      "16"
+    ],
+    "exact_source_options_checked": true
+  },
+  "GPU_execution": "H100 small source/timing validation job 3732258 still queued at package preparation; production GPU replay not run",
+  "original_pending_validation_checksums": "verified unchanged"
+}

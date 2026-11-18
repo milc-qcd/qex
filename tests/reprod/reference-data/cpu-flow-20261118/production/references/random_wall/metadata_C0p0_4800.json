@@ -1,0 +1,71 @@
+{
+  "source-kind": "random-wall",
+  "seed": 457046288,
+  "source-count": 1,
+  "source-times": [
+    16
+  ],
+  "source-colors": 3,
+  "inversions-per-time": 1,
+  "inversions-per-flavor": 1,
+  "source-average": "arithmetic mean after aligning each source time",
+  "rng-scheme": "RngMilc6 wall v1; times=volume; corners=volume+1; noise=global sites, sequential Z4",
+  "time-sampling": "explicit list",
+  "lattice-geometry": [
+    64,
+    64,
+    64,
+    96
+  ],
+  "source-operator": "P = epsilon * barChi * chi",
+  "configuration": "4800",
+  "gauge-file": "l6496f211b630m001326m03636m4313a.4800.ildg",
+  "mass": [
+    0.03636
+  ],
+  "time-index": "(sink time - source time + Nt) mod Nt",
+  "current-component": "forward only; conserved current includes Naik",
+  "source": "Z4 full-color random wall",
+  "normalization": "divide by spatial volume; color trace is summed",
+  "sources": [
+    {
+      "source-kind": "random-wall",
+      "seed": 457046288,
+      "source-count": 1,
+      "source-times": [
+        16
+      ],
+      "source-colors": 3,
+      "inversions-per-time": 1,
+      "inversions-per-flavor": 1,
+      "source-average": "arithmetic mean after aligning each source time",
+      "rng-scheme": "RngMilc6 wall v1; times=volume; corners=volume+1; noise=global sites, sequential Z4",
+      "time-sampling": "explicit list",
+      "lattice-geometry": [
+        64,
+        64,
+        64,
+        96
+      ],
+      "source-operator": "P = epsilon * barChi * chi",
+      "configuration": "4800",
+      "gauge-file": "l6496f211b630m001326m03636m4313a.4800.ildg",
+      "mass": [
+        0.03636
+      ],
+      "time-index": "(sink time - source time + Nt) mod Nt",
+      "current-component": "forward only; conserved current includes Naik",
+      "source": "Z4 full-color random wall",
+      "normalization": "divide by spatial volume; color trace is summed",
+      "source-index": 0,
+      "source-time": 16,
+      "source-norm2": 786432.0,
+      "source-field": "source_4800.qio",
+      "source-field-verified": true
+    }
+  ],
+  "source-time": 16,
+  "source-norm2": 786432.0,
+  "source-field": "source_4800.qio",
+  "source-field-verified": true
+}

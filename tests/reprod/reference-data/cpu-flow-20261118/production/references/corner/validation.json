@@ -1,0 +1,296 @@
+{
+  "status": "passed",
+  "configuration": 4800,
+  "kind": "corner",
+  "source_time": 43,
+  "source_corner": 2,
+  "seed": 425588683,
+  "inversions": 3,
+  "solver_iterations": [
+    669,
+    669,
+    669
+  ],
+  "solver_residuals_squared": [
+    9.419e-21,
+    9.594e-21,
+    9.531e-21
+  ],
+  "application_seconds": 2333.83790694,
+  "solver_log_seconds": 41.629999999999995,
+  "flow_steps": 280,
+  "correlator_measurements": 81,
+  "comparison_with_previous": {
+    "correlators": {
+      "passed": true,
+      "channels": {
+        "A0P_thin_im_ss": {
+          "passed": true,
+          "maximum_absolute_difference": 7.105427357601002e-15,
+          "reference_peak": 5.241351104968071,
+          "allowed_difference": 5.242351104968071e-08
+        },
+        "A0P_thin_re_ss": {
+          "passed": true,
+          "maximum_absolute_difference": 1.1368683772161603e-13,
+          "reference_peak": 956.2736131007258,
+          "allowed_difference": 9.562746131007259e-06
+        },
+        "P-P_ss": {
+          "passed": true,
+          "maximum_absolute_difference": 0.0,
+          "reference_peak": 38038.45424646251,
+          "allowed_difference": 0.00038038455246462515
+        },
+        "PP_ss": {
+          "passed": true,
+          "maximum_absolute_difference": 0.0,
+          "reference_peak": 38038.45424646251,
+          "allowed_difference": 0.00038038455246462515
+        },
+        "cA0P_im_ss": {
+          "passed": true,
+          "maximum_absolute_difference": 1.3988810110276972e-14,
+          "reference_peak": 6.669147932344898,
+          "allowed_difference": 6.670147932344898e-08
+        },
+        "cA0P_re_ss": {
+          "passed": true,
+          "maximum_absolute_difference": 2.2737367544323206e-13,
+          "reference_peak": 1199.367896583124,
+          "allowed_difference": 1.1993688965831241e-05
+        }
+      },
+      "absolute_tolerance": 1e-11,
+      "relative_channel_peak_tolerance": 1e-08
+    },
+    "gauge_observables": {
+      "passed": true,
+      "channels": {
+        "Im(spacelike-Polyakov-loop)": {
+          "passed": true,
+          "maximum_absolute_difference": 0.0,
+          "reference_peak": 0.005634777709283495,
+          "allowed_difference": 6.634777709283496e-11
+        },
+        "Im(timelike-Polyakov-loop)": {
+          "passed": true,
+          "maximum_absolute_difference": 0.0,
+          "reference_peak": 0.01037763455609593,
+          "allowed_difference": 1.137763455609593e-10
+        },
+        "Re(spacelike-Polyakov-loop)": {
+          "passed": true,
+          "maximum_absolute_difference": 0.0,
+          "reference_peak": 0.005430940241168012,
+          "allowed_difference": 6.430940241168013e-11
+        },
+        "Re(timelike-Polyakov-loop)": {
+          "passed": true,
+          "maximum_absolute_difference": 0.0,
+          "reference_peak": 0.01187398868300871,
+          "allowed_difference": 1.287398868300871e-10
+        },
+        "clover": {
+          "passed": true,
+          "maximum_absolute_difference": 0.0,
+          "reference_peak": 2.122318668690036,
+          "allowed_difference": 2.1233186686900365e-08
+        },
+        "flow-time": {
+          "passed": true,
+          "maximum_absolute_difference": 1.7763568394002505e-15,
+          "reference_peak": 8.0,
+          "allowed_difference": 8.001e-08
+        },
+        "plaquette": {
+          "passed": true,
+          "maximum_absolute_difference": 0.0,
+          "reference_peak": 2.99903299524604,
+          "allowed_difference": 3.00003299524604e-08
+        },
+        "t2E-clover": {
+          "passed": true,
+          "maximum_absolute_difference": 2.220446049250313e-16,
+          "reference_peak": 0.7170517961758548,
+          "allowed_difference": 7.180517961758548e-09
+        },
+        "t2E-plaquette": {
+          "passed": true,
+          "maximum_absolute_difference": 1.4210854715202004e-13,
+          "reference_peak": 0.7426596510408956,
+          "allowed_difference": 7.436596510408956e-09
+        },
+        "t2E-spacelike-clover": {
+          "passed": true,
+          "maximum_absolute_difference": 2.220446049250313e-16,
+          "reference_peak": 0.3572988640451498,
+          "allowed_difference": 3.5829886404514983e-09
+        },
+        "t2E-spacelike-plaquette": {
+          "passed": true,
+          "maximum_absolute_difference": 8.532063944244328e-14,
+          "reference_peak": 0.3700611305505674,
+          "allowed_difference": 3.710611305505674e-09
+        },
+        "t2E-timelike-clover": {
+          "passed": true,
+          "maximum_absolute_difference": 1.1102230246251565e-16,
+          "reference_peak": 0.359752932130705,
+          "allowed_difference": 3.6075293213070505e-09
+        },
+        "t2E-timelike-plaquette": {
+          "passed": true,
+          "maximum_absolute_difference": 7.904787935331115e-14,
+          "reference_peak": 0.3725985204903282,
+          "allowed_difference": 3.7359852049032816e-09
+        },
+        "topological-charge": {
+          "passed": true,
+          "maximum_absolute_difference": 0.0,
+          "reference_peak": 20.99208088667182,
+          "allowed_difference": 2.099308088667182e-07
+        }
+      },
+      "absolute_tolerance": 1e-11,
+      "relative_channel_peak_tolerance": 1e-08
+    }
+  },
+  "source_payload": null,
+  "timing_accounting_passed": true,
+  "timing": {
+    "schema_version": 1,
+    "units": "seconds",
+    "clock": "monotonic wall clock",
+    "mpi_ranks": 256,
+    "scope": "after qexInit through ordinary output; excludes timing report and qexFinalize",
+    "aggregation": "min/mean/max across ranks of accumulated local elapsed time; includes communication within each region; no per-region barriers",
+    "accounting": "exclusive phases; sum of rank means including other equals total rank mean; maxima can belong to different ranks and must not be summed as wall time",
+    "phases": {
+      "gauge_flow": {
+        "rank_min_seconds": 108.077206872,
+        "rank_mean_seconds": 117.3159629328906,
+        "rank_max_seconds": 130.2775102369999,
+        "rank_min_segments": 1961,
+        "rank_max_segments": 1961,
+        "description": "Gauge force, RK matrix exponentials/link updates, gauge work buffers, flow reunitarization; excludes HISQ construction and measurements"
+      },
+      "fermion_flow": {
+        "rank_min_seconds": 147.232162148,
+        "rank_mean_seconds": 154.4904447333828,
+        "rank_max_seconds": 158.6997290749999,
+        "rank_min_segments": 1120,
+        "rank_max_segments": 1120,
+        "description": "All source fields: directional HISQ Laplacians, RK vector updates, and fermion work buffers; excludes HISQ construction"
+      },
+      "contractions": {
+        "rank_min_seconds": 3.845517666000002,
+        "rank_mean_seconds": 3.885276518878907,
+        "rank_max_seconds": 3.918624062999999,
+        "rank_min_segments": 81,
+        "rank_max_segments": 81,
+        "description": "All source/color contractions, normalization, time alignment, source averaging and correlator JSON assembly; excludes HISQ construction"
+      },
+      "solve": {
+        "rank_min_seconds": 41.62491180400001,
+        "rank_mean_seconds": 41.62521876935548,
+        "rank_max_seconds": 41.625582771,
+        "rank_min_segments": 3,
+        "rank_max_segments": 3,
+        "description": "Zeroing each solution and stag.solve, including solver setup and communication; excludes HISQ construction and source generation/I/O"
+      },
+      "hisq_links_flow": {
+        "rank_min_seconds": 1327.624691839001,
+        "rank_mean_seconds": 1338.288958360746,
+        "rank_max_seconds": 1343.634540611999,
+        "rank_min_segments": 840,
+        "rank_max_segments": 840,
+        "description": "HISQ construction and staggered-operator setup at all three RK stages, shared by all source fields"
+      },
+      "hisq_links_solve": {
+        "rank_min_seconds": 3.290189389,
+        "rank_mean_seconds": 3.297189312621094,
+        "rank_max_seconds": 3.318708002,
+        "rank_min_segments": 1,
+        "rank_max_segments": 1,
+        "description": "HISQ construction and staggered-operator setup before the solves, shared by all source fields"
+      },
+      "hisq_links_contractions": {
+        "rank_min_seconds": 124.402962008,
+        "rank_mean_seconds": 124.4335295881641,
+        "rank_max_seconds": 124.471582438,
+        "rank_min_segments": 81,
+        "rank_max_segments": 81,
+        "description": "HISQ construction at each correlator measurement, shared by all source fields"
+      },
+      "gauge_measurements": {
+        "rank_min_seconds": 324.3800328660002,
+        "rank_mean_seconds": 329.0960048078945,
+        "rank_max_seconds": 331.8180727990002,
+        "rank_min_segments": 562,
+        "rank_max_segments": 562,
+        "description": "Gauge observables, including flowMeasurements and diagnostic plaquettes"
+      },
+      "flow_diagnostics": {
+        "rank_min_seconds": 0.792919364,
+        "rank_mean_seconds": 1.177958336453125,
+        "rank_max_seconds": 1.516079100000001,
+        "rank_min_segments": 1400,
+        "rank_max_segments": 1400,
+        "description": "Diagnostic propagator/work-vector norms and flow-state printing"
+      },
+      "source_generation": {
+        "rank_min_seconds": 0.020955628,
+        "rank_mean_seconds": 0.04252562459375001,
+        "rank_max_seconds": 0.049652755,
+        "rank_min_segments": 4,
+        "rank_max_segments": 4,
+        "description": "Noise RNG field initialization and construction/validation of wall sources"
+      },
+      "source_io": {
+        "rank_min_seconds": 0.0,
+        "rank_mean_seconds": 0.0,
+        "rank_max_seconds": 0.0,
+        "rank_min_segments": 0,
+        "rank_max_segments": 0,
+        "description": "Source QIO existence check, write, readback and exact field verification"
+      },
+      "gauge_input": {
+        "rank_min_seconds": 9.127534924,
+        "rank_mean_seconds": 29.92047771885938,
+        "rank_max_seconds": 32.891820233,
+        "rank_min_segments": 1,
+        "rank_max_segments": 1,
+        "description": "Input gauge-file loading"
+      },
+      "output_io": {
+        "rank_min_seconds": 0.024563769,
+        "rank_mean_seconds": 0.0253849492109375,
+        "rank_max_seconds": 0.042087742,
+        "rank_min_segments": 4,
+        "rank_max_segments": 4,
+        "description": "Observable/metadata serialization and file writes; excludes timing-report output"
+      },
+      "other": {
+        "rank_min_seconds": 0.8624042860001282,
+        "rank_mean_seconds": 4.025900623324203,
+        "rank_max_seconds": 24.88396552800168,
+        "rank_min_segments": 1,
+        "rank_max_segments": 1,
+        "description": "Other setup, bookkeeping, logging, garbage collection and timer overhead"
+      }
+    },
+    "total": {
+      "rank_min_seconds": 2147.615793976,
+      "rank_mean_seconds": 2147.624832276375,
+      "rank_max_seconds": 2147.63547316,
+      "rank_min_segments": 1,
+      "rank_max_segments": 1
+    },
+    "configuration": "4800",
+    "source_mode": "corner-wall",
+    "source_count": 1,
+    "solution_fields": 3,
+    "seed": 425588683
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "status": "passed",
+  "C_compile_commands": 93,
+  "C_flags": [
+    "-Ofast",
+    "-march=sapphirerapids",
+    "-fopenmp",
+    "-pthread"
+  ],
+  "Nim_command": "/work2/11599/mdai07/stampede3/opt/bin/nim  --path:qex/src --cc:clang --clang.exe:mpiicx --clang.linkerexe:mpiicx --clang.options.always:-g --clang.options.debug --clang.options.speed:'-Ofast -march=sapphirerapids' --clang.options.linker:'-g -ldl' --clang.cpp.exe:mpiicpx --clang.cpp.linkerexe:mpiicpx --clang.cpp.options.always:-g --clang.cpp.options.debug --clang.cpp.options.speed:'-Ofast -march=sapphirerapids' --clang.cpp.options.linker:'-g -ldl' --d:qmpDir:/work2/11599/mdai07/stampede3/milc-qex/deps-mpi/qmp --d:qioDir:/work2/11599/mdai07/stampede3/milc-qex/deps-mpi/qio --threads:on --tlsEmulation:off --verbosity:1 --nimcache:/work2/11599/mdai07/stampede3/test/statstudy/cpu-phase-benchmark-20261117/nimcache --warning[SmallLshouldNotBeUsed]:off --styleCheck:usages --embedsrc --mm:refc --d:release --d:danger --putenv:VLEN=8 --parallelBuild:4 cc -o:bin/hisqflowwall ./source/hisqflowwall.nim",
+  "binary_sha256": "adb9ad83fea4daefa32c503965449c0d9ce855b7983e86ca19fa440ed7e9f35b"
+}

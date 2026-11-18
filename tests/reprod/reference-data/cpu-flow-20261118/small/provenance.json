@@ -1,0 +1,29 @@
+{
+  "status": "passed",
+  "cpu_qex_commit": "26b3941234dc7332ff28d100ed71516976e025a6",
+  "CPU_binary_sha256": "2e74d3331bcaa3808f49a697c72cb27572642dea09af77ecc9922d0f5f5c0cc8",
+  "reference_driver": "CPU hisqflowwall, before timing instrumentation",
+  "recorded_cases": [
+    "corner-fixed",
+    "corner-wall-boundary",
+    "corner-wall-interacting",
+    "corner-wall-random",
+    "random-wall-boundary",
+    "random-wall-interacting",
+    "random-wall-random"
+  ],
+  "geometry": [
+    8,
+    8,
+    8,
+    8
+  ],
+  "mass": 0.2,
+  "flow_mass": 0,
+  "flow": {
+    "action": "Wilson",
+    "step": 0.02,
+    "maximum_time": 0.1
+  },
+  "note": "Reference options and exact fixture hashes are in each params.json."
+}

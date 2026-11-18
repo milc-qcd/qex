@@ -1,0 +1,9 @@
+{
+  "options": [
+    "--source=random-wall",
+    "--sources=3",
+    "--seed=0",
+    "--source-times=[7,7,0]"
+  ],
+  "gauge_sha256": "781d4a28cf718414308c14265b8174ce525d30b75f0537a75084cff58565e3a4"
+}

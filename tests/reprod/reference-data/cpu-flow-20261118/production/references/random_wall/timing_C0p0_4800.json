@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "units": "seconds",
+  "clock": "monotonic wall clock",
+  "mpi_ranks": 256,
+  "scope": "after qexInit through ordinary output; excludes timing report and qexFinalize",
+  "aggregation": "min/mean/max across ranks of accumulated local elapsed time; includes communication within each region; no per-region barriers",
+  "accounting": "exclusive phases; sum of rank means including other equals total rank mean; maxima can belong to different ranks and must not be summed as wall time",
+  "phases": {
+    "gauge_flow": {
+      "rank_min_seconds": 106.7829592060002,
+      "rank_mean_seconds": 114.4375316535781,
+      "rank_max_seconds": 125.7354541369995,
+      "rank_min_segments": 1961,
+      "rank_max_segments": 1961,
+      "description": "Gauge force, RK matrix exponentials/link updates, gauge work buffers, flow reunitarization; excludes HISQ construction and measurements"
+    },
+    "fermion_flow": {
+      "rank_min_seconds": 47.54559473900002,
+      "rank_mean_seconds": 51.45320054032813,
+      "rank_max_seconds": 54.203851071,
+      "rank_min_segments": 1120,
+      "rank_max_segments": 1120,
+      "description": "All source fields: directional HISQ Laplacians, RK vector updates, and fermion work buffers; excludes HISQ construction"
+    },
+    "contractions": {
+      "rank_min_seconds": 2.121765771999999,
+      "rank_mean_seconds": 2.16073656090625,
+      "rank_max_seconds": 2.195646900999999,
+      "rank_min_segments": 81,
+      "rank_max_segments": 81,
+      "description": "All source/color contractions, normalization, time alignment, source averaging and correlator JSON assembly; excludes HISQ construction"
+    },
+    "solve": {
+      "rank_min_seconds": 14.256572595,
+      "rank_mean_seconds": 14.25669075292578,
+      "rank_max_seconds": 14.256959561,
+      "rank_min_segments": 1,
+      "rank_max_segments": 1,
+      "description": "Zeroing each solution and stag.solve, including solver setup and communication; excludes HISQ construction and source generation/I/O"
+    },
+    "hisq_links_flow": {
+      "rank_min_seconds": 1270.826653483002,
+      "rank_mean_seconds": 1278.708999939473,
+      "rank_max_seconds": 1281.381519232,
+      "rank_min_segments": 840,
+      "rank_max_segments": 840,
+      "description": "HISQ construction and staggered-operator setup at all three RK stages, shared by all source fields"
+    },
+    "hisq_links_solve": {
+      "rank_min_seconds": 3.29431495,
+      "rank_mean_seconds": 3.302364077128907,
+      "rank_max_seconds": 3.317487489,
+      "rank_min_segments": 1,
+      "rank_max_segments": 1,
+      "description": "HISQ construction and staggered-operator setup before the solves, shared by all source fields"
+    },
+    "hisq_links_contractions": {
+      "rank_min_seconds": 123.342406878,
+      "rank_mean_seconds": 123.3758053139492,
+      "rank_max_seconds": 123.414833076,
+      "rank_min_segments": 81,
+      "rank_max_segments": 81,
+      "description": "HISQ construction at each correlator measurement, shared by all source fields"
+    },
+    "gauge_measurements": {
+      "rank_min_seconds": 325.512176706,
+      "rank_mean_seconds": 329.2254992624687,
+      "rank_max_seconds": 331.8708744800002,
+      "rank_min_segments": 562,
+      "rank_max_segments": 562,
+      "description": "Gauge observables, including flowMeasurements and diagnostic plaquettes"
+    },
+    "flow_diagnostics": {
+      "rank_min_seconds": 0.7289644419999994,
+      "rank_mean_seconds": 0.9506883844257815,
+      "rank_max_seconds": 1.133854062000002,
+      "rank_min_segments": 1400,
+      "rank_max_segments": 1400,
+      "description": "Diagnostic propagator/work-vector norms and flow-state printing"
+    },
+    "source_generation": {
+      "rank_min_seconds": 0.03388903,
+      "rank_mean_seconds": 0.0490541274921875,
+      "rank_max_seconds": 0.05685503500000001,
+      "rank_min_segments": 2,
+      "rank_max_segments": 2,
+      "description": "Noise RNG field initialization and construction/validation of wall sources"
+    },
+    "source_io": {
+      "rank_min_seconds": 4.935493971000001,
+      "rank_mean_seconds": 4.935828579722656,
+      "rank_max_seconds": 4.935987330000001,
+      "rank_min_segments": 1,
+      "rank_max_segments": 1,
+      "description": "Source QIO existence check, write, readback and exact field verification"
+    },
+    "gauge_input": {
+      "rank_min_seconds": 1.10197187,
+      "rank_mean_seconds": 1.114323912851563,
+      "rank_max_seconds": 1.189718942,
+      "rank_min_segments": 1,
+      "rank_max_segments": 1,
+      "description": "Input gauge-file loading"
+    },
+    "output_io": {
+      "rank_min_seconds": 0.023467004,
+      "rank_mean_seconds": 0.02760440132421876,
+      "rank_max_seconds": 0.038874666,
+      "rank_min_segments": 4,
+      "rank_max_segments": 4,
+      "description": "Observable/metadata serialization and file writes; excludes timing-report output"
+    },
+    "other": {
+      "rank_min_seconds": 0.6843706419997488,
+      "rank_mean_seconds": 1.023717952015583,
+      "rank_max_seconds": 1.177223516000822,
+      "rank_min_segments": 1,
+      "rank_max_segments": 1,
+      "description": "Other setup, bookkeeping, logging, garbage collection and timer overhead"
+    }
+  },
+  "total": {
+    "rank_min_seconds": 1925.00976373,
+    "rank_mean_seconds": 1925.02204545859,
+    "rank_max_seconds": 1925.030816858,
+    "rank_min_segments": 1,
+    "rank_max_segments": 1
+  },
+  "configuration": "4800",
+  "source_mode": "random-wall",
+  "source_count": 1,
+  "solution_fields": 1,
+  "seed": 457046288
+}

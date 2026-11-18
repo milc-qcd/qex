@@ -1,0 +1,4 @@
+# Keep the recorded CPU build sources byte-for-byte, including original whitespace.
+cpu-source/*.nim -whitespace
+# The last TSV cell is deliberately empty where a ratio is undefined.
+production/timings.tsv -whitespace

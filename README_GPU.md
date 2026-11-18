@@ -441,6 +441,12 @@ GPU-aware MPI is not required by this implementation.
 
 ## 7. Inspect and compare the output
 
+For a portable test package with saved CPU results, small gauge fixtures,
+and an exact replay of the 0.09 fm configuration-4800 timing benchmark, see
+[the collaborator GPU test guide](docs/COLLABORATOR_GPU_TESTS.md). It provides
+source/correlator comparisons and phase-timing checks without requiring the
+original CPU executable or access to the author's filesystem.
+
 For the example above, `$out` contains:
 
 - `correlator_C0p0_1000`: correlators in JSON format.

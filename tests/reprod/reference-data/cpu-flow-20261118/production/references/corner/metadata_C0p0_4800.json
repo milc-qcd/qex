@@ -1,0 +1,153 @@
+{
+  "source-kind": "corner-wall",
+  "seed": 425588683,
+  "source-count": 1,
+  "source-times": [
+    43
+  ],
+  "source-colors": 3,
+  "inversions-per-time": 3,
+  "inversions-per-flavor": 3,
+  "source-average": "arithmetic mean after aligning each source time",
+  "rng-scheme": "RngMilc6 wall v1; times=volume; corners=volume+1; noise=global sites, sequential Z4",
+  "time-sampling": "explicit list",
+  "lattice-geometry": [
+    64,
+    64,
+    64,
+    96
+  ],
+  "source-operator": "P = epsilon * barChi * chi",
+  "configuration": "4800",
+  "gauge-file": "l6496f211b630m001326m03636m4313a.4800.ildg",
+  "mass": [
+    0.03636
+  ],
+  "time-index": "(sink time - source time + Nt) mod Nt",
+  "current-component": "forward only; conserved current includes Naik",
+  "source": "color-diluted corner wall",
+  "source-corners": [
+    2
+  ],
+  "source-corner-fixed": true,
+  "normalization": "legacy corner-wall color sum; no spatial-volume division",
+  "sources": [
+    {
+      "source-kind": "corner-wall",
+      "seed": 425588683,
+      "source-count": 1,
+      "source-times": [
+        43
+      ],
+      "source-colors": 3,
+      "inversions-per-time": 3,
+      "inversions-per-flavor": 3,
+      "source-average": "arithmetic mean after aligning each source time",
+      "rng-scheme": "RngMilc6 wall v1; times=volume; corners=volume+1; noise=global sites, sequential Z4",
+      "time-sampling": "explicit list",
+      "lattice-geometry": [
+        64,
+        64,
+        64,
+        96
+      ],
+      "source-operator": "P = epsilon * barChi * chi",
+      "configuration": "4800",
+      "gauge-file": "l6496f211b630m001326m03636m4313a.4800.ildg",
+      "mass": [
+        0.03636
+      ],
+      "time-index": "(sink time - source time + Nt) mod Nt",
+      "current-component": "forward only; conserved current includes Naik",
+      "source": "color-diluted corner wall",
+      "source-corners": [
+        2
+      ],
+      "source-corner-fixed": true,
+      "normalization": "legacy corner-wall color sum; no spatial-volume division",
+      "source-index": 0,
+      "source-time": 43,
+      "source-color": 0,
+      "source-corner": 2,
+      "source-norm2": 32768.0
+    },
+    {
+      "source-kind": "corner-wall",
+      "seed": 425588683,
+      "source-count": 1,
+      "source-times": [
+        43
+      ],
+      "source-colors": 3,
+      "inversions-per-time": 3,
+      "inversions-per-flavor": 3,
+      "source-average": "arithmetic mean after aligning each source time",
+      "rng-scheme": "RngMilc6 wall v1; times=volume; corners=volume+1; noise=global sites, sequential Z4",
+      "time-sampling": "explicit list",
+      "lattice-geometry": [
+        64,
+        64,
+        64,
+        96
+      ],
+      "source-operator": "P = epsilon * barChi * chi",
+      "configuration": "4800",
+      "gauge-file": "l6496f211b630m001326m03636m4313a.4800.ildg",
+      "mass": [
+        0.03636
+      ],
+      "time-index": "(sink time - source time + Nt) mod Nt",
+      "current-component": "forward only; conserved current includes Naik",
+      "source": "color-diluted corner wall",
+      "source-corners": [
+        2
+      ],
+      "source-corner-fixed": true,
+      "normalization": "legacy corner-wall color sum; no spatial-volume division",
+      "source-index": 0,
+      "source-time": 43,
+      "source-color": 1,
+      "source-corner": 2,
+      "source-norm2": 32768.0
+    },
+    {
+      "source-kind": "corner-wall",
+      "seed": 425588683,
+      "source-count": 1,
+      "source-times": [
+        43
+      ],
+      "source-colors": 3,
+      "inversions-per-time": 3,
+      "inversions-per-flavor": 3,
+      "source-average": "arithmetic mean after aligning each source time",
+      "rng-scheme": "RngMilc6 wall v1; times=volume; corners=volume+1; noise=global sites, sequential Z4",
+      "time-sampling": "explicit list",
+      "lattice-geometry": [
+        64,
+        64,
+        64,
+        96
+      ],
+      "source-operator": "P = epsilon * barChi * chi",
+      "configuration": "4800",
+      "gauge-file": "l6496f211b630m001326m03636m4313a.4800.ildg",
+      "mass": [
+        0.03636
+      ],
+      "time-index": "(sink time - source time + Nt) mod Nt",
+      "current-component": "forward only; conserved current includes Naik",
+      "source": "color-diluted corner wall",
+      "source-corners": [
+        2
+      ],
+      "source-corner-fixed": true,
+      "normalization": "legacy corner-wall color sum; no spatial-volume division",
+      "source-index": 0,
+      "source-time": 43,
+      "source-color": 2,
+      "source-corner": 2,
+      "source-norm2": 32768.0
+    }
+  ]
+}

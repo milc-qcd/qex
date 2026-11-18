@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "configuration": "4800",
+  "gauge": {
+    "filename": "l6496f211b630m001326m03636m4313a.4800.ildg",
+    "size_bytes": 7247757944,
+    "sha256": "beeda4061921408126283a5d3eea7767f9af6f43a40820ddc304f39c8119f3e4"
+  },
+  "geometry": [
+    64,
+    64,
+    64,
+    96
+  ],
+  "mass": 0.03636,
+  "flow_mass": 0,
+  "flow_steps": 280,
+  "flow_intervals": 2,
+  "correlator_measurements": 81,
+  "gauge_measurements": 281,
+  "channels": [
+    "PP_ss",
+    "P-P_ss",
+    "A0P_thin_re_ss",
+    "A0P_thin_im_ss",
+    "cA0P_re_ss",
+    "cA0P_im_ss"
+  ],
+  "cases": {
+    "corner": {
+      "source_mode": "corner-wall",
+      "seed": 425588683,
+      "source_times": [
+        43
+      ],
+      "source_corner": 2,
+      "inversions": 3,
+      "save_source": false
+    },
+    "random_wall": {
+      "source_mode": "random-wall",
+      "seed": 457046288,
+      "source_times": [
+        16
+      ],
+      "inversions": 1,
+      "save_source": true
+    }
+  },
+  "absolute_tolerance": 1e-11,
+  "relative_channel_peak_tolerance": 1e-08,
+  "cpu_job": 3732213,
+  "cpu_completed": "2026-11-18T00:00:24.828848-06:00",
+  "cpu_nodes": 8,
+  "cpu_mpi_ranks": 256,
+  "cpu_threads_per_rank": 2,
+  "cpu_rank_geometry": [
+    4,
+    4,
+    4,
+    4
+  ],
+  "cpu_simd_geometry": [
+    2,
+    2,
+    1,
+    2
+  ],
+  "cpu_qex_commit": "26b3941234dc7332ff28d100ed71516976e025a6",
+  "cpu_binary_sha256": "adb9ad83fea4daefa32c503965449c0d9ce855b7983e86ca19fa440ed7e9f35b",
+  "gpu_implementation_commit": "80cec59c4097a32e8086e13750a6b2f5331c1c87",
+  "random_source_payload": {
+    "bytes": 1207959552,
+    "sha256": "05f05695c56d1bc00e8785bd21b5e0d4b1e1e6f2ff4db738ed8fac2a050bb41a"
+  },
+  "notes": [
+    "Numerical and timing JSON copied from successful CPU runs, not regenerated.",
+    "Metadata file paths reduced to basenames for portability.",
+    "Production gauge and large saved source field are not distributed; hashes identify them.",
+    "GPU corner mode has extra meson channels and an extra contraction HISQ construction.",
+    "Compare the six shared channels; total/contraction timing ratios are not equal-work speedups.",
+    "CPU source snapshots require the recorded QEX base and an appropriately configured MPI/QIO toolchain."
+  ]
+}

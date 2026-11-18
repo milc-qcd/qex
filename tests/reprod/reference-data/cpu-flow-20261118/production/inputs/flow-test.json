@@ -1,0 +1,8 @@
+{
+  "C0p0": {
+    "action": "Wilson",
+    "time-increments": [0.02, 0.1],
+    "maximum-flow-times": [5.0, 8.0],
+    "loops": 1
+  }
+}
