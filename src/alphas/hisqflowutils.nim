@@ -1,4 +1,5 @@
 import qex
+import flowTimings
 import gauge
 import gauge/[gaugeUtils, hisqsmear]
 import physics/[stagSolve]
@@ -66,6 +67,8 @@ proc formatMeasurements*(
     else: discard
 
 proc flowMeasurements*(u: auto; loop: int; tau: float): JsonNode =
+  let measurementStart = flowTimerStart()
+  defer: flowTimerStop(ftGaugeMeasurements, measurementStart)
   var
     pls, plt: ComplexProxy[ComplexObj[float64, float64]]
     poly: seq[ComplexProxy[ComplexObj[float64, float64]]]
@@ -114,6 +117,8 @@ proc laplace4D[U, F](u: U; psi_in: F): F =
   return r
 
 proc hisqStag[U](u: U): auto =
+  let linksStart = flowTimerStart()
+  defer: flowTimerStop(ftHisqLinksFlow, linksStart)
   let lo = u[0].l
   u.rephase()
   let hisq = newHisq(0.0, 1.0)
@@ -184,7 +189,7 @@ template staggeredFlowCpuImpl(
   proc flowProc {.gensym.} =
     tic("flowProc")
     const nc = g[0][0].nrows.float
-    const nci = g[0][0].nrows
+    let nci = phi0.len
     const nsrcTime = phi0[0].len
     const ncorners = phi0[0][0].len
     const nmasses = phi0[0][0][0].len
@@ -199,21 +204,25 @@ template staggeredFlowCpuImpl(
         stagLap4D(g, stag, src, mass)
     template prepareFlowLinks(stag: untyped) =
       when useGpu:
-        gpuFlow.updateLinks(stag)
+        flowTimed(ftHisqLinksFlow): gpuFlow.updateLinks(stag)
     var n = 1
     # echo "phi0[0][0][0][0].norm2: ", phi0[0][0][0][0].norm2 # print the first element of the first propagator as a sanity check to make sure the flow is actually doing something to the propagators
     while true:
       echo "first step"
-      g.echoPlaq
+      flowTimed(ftGaugeMeasurements): g.echoPlaq
       let tau = n * eps
       let epsnc = eps * nc # compensate force normalization
       block:
+        let gaugeBuffersStart = flowTimerStart()
         var
           p = g[0].l.newGauge # mom
           f = g[0].l.newGauge # force
+        flowTimerStop(ftGaugeFlow, gaugeBuffersStart)
+        let fermionBuffersStart = flowTimerStart()
         var
-          d0p0, d1p1, phi1: array[nci, array[nsrcTime, array[ncorners, array[
-                  nmasses, typeof(lo.ColorVector)]]]] #array[5,typeof()] is a type
+          d0p0 = newSeq[typeof(phi0[0])](nci)
+          d1p1 = newSeq[typeof(phi0[0])](nci)
+          phi1 = newSeq[typeof(phi0[0])](nci)
         echo "Initializing arrays"
             # threads:
               # Initialize the arrays with the same structure as phi0
@@ -224,70 +233,77 @@ template staggeredFlowCpuImpl(
                 d0p0[color][srct][corner][mass] = lo.ColorVector()
                 d1p1[color][srct][corner][mass] = lo.ColorVector()
                 phi1[color][srct][corner][mass] = lo.ColorVector()
+        flowTimerStop(ftFermionFlow, fermionBuffersStart)
         block:
           let stag = hisqStag(g) # use hisqStag(g) for hisq, newStag(g) for ordinary staggeref fermions
           prepareFlowLinks(stag)
-          gc.gaugeForce(g, f)
-          for color in 0..<nci:
-            for srct in 0..<nsrcTime:
-              for corner in 0..<ncorners:
-                for mass in 0..<nmasses:
-                  d0p0[color][srct][corner][mass] := eps*flowLaplacian(stag, phi0[
-                      color][srct][corner][mass], M[mass]) #Delta0
-                  threads:
-                    phi1[color][srct][corner][mass] := phi0[color][srct][corner][
-                        mass] +
-                      0.25*d0p0[color][srct][corner][mass]
-        echo "d0p0[0][0][0][0].norm2: ", d0p0[0][0][0][0].norm2 # print the first element of the first d0p0 as a sanity check to make sure the flow is actually doing something to the propagators
-        echo "phi1[0][0][0][0].norm2: ", phi1[0][0][0][0].norm2 # print the first element of the first phi1 as a sanity check to make sure the flow is actually doing something to the propagators
-        threads:
-          for mu in 0..<f.len:
-            for e in g[mu]:
-              var v {.noinit.}: type(load1(f[0][0]))
-              v := (-1.0/4.0)*epsnc*f[mu][e] # 1/4 Z0
-              let t = exp(v)*g[mu][e] # exp(1/4 Z0) w0
-              p[mu][e] := v # 1/4 Z0
-              g[mu][e] := t # W1
+          flowTimed(ftGaugeFlow): gc.gaugeForce(g, f)
+          flowTimed(ftFermionFlow):
+            for color in 0..<nci:
+              for srct in 0..<nsrcTime:
+                for corner in 0..<ncorners:
+                  for mass in 0..<nmasses:
+                    d0p0[color][srct][corner][mass] := eps*flowLaplacian(stag, phi0[
+                        color][srct][corner][mass], M[mass]) #Delta0
+                    threads:
+                      phi1[color][srct][corner][mass] := phi0[color][srct][corner][
+                          mass] +
+                        0.25*d0p0[color][srct][corner][mass]
+        flowTimed(ftFlowDiagnostics): echo "d0p0[0][0][0][0].norm2: ", d0p0[0][0][0][0].norm2 # print the first element of the first d0p0 as a sanity check to make sure the flow is actually doing something to the propagators
+        flowTimed(ftFlowDiagnostics): echo "phi1[0][0][0][0].norm2: ", phi1[0][0][0][0].norm2 # print the first element of the first phi1 as a sanity check to make sure the flow is actually doing something to the propagators
+        flowTimed(ftGaugeFlow):
+          threads:
+            for mu in 0..<f.len:
+              for e in g[mu]:
+                var v {.noinit.}: type(load1(f[0][0]))
+                v := (-1.0/4.0)*epsnc*f[mu][e] # 1/4 Z0
+                let t = exp(v)*g[mu][e] # exp(1/4 Z0) w0
+                p[mu][e] := v # 1/4 Z0
+                g[mu][e] := t # W1
         #fermion flow step 1: d1p1 = eps*laplace4D[g,phi1] #Delta1
         block:
           let stag1 = hisqStag(g) # HISQ links at W1
           prepareFlowLinks(stag1)
-          for color in 0..<nci:
-            for srct in 0..<nsrcTime:
-              for corner in 0..<ncorners:
-                for mass in 0..<nmasses:
-                  d1p1[color][srct][corner][mass] := eps*flowLaplacian(stag1, phi1[
-                      color][srct][corner][mass], M[mass]) #Delta1
-        echo "d1p1[0][0][0][0].norm2: ", d1p1[0][0][0][0].norm2 # print the first element of the first d1p1 as a sanity check to make sure the flow is actually doing something to the propagators
-        gc.gaugeForce(g, f) # f is now -dS/dU at U = W1
-        threads:
-          for mu in 0..<f.len:
-            for e in g[mu]:
-              var v {.noinit.}: type(load1(f[0][0]))
-              v := (-8.0/9.0)*epsnc*f[mu][e] + (-17.0/9.0)*p[mu][e] # 8/9 Z1 - 17/36 Z0
-              let t = exp(v)*g[mu][e] # exp(8/9 Z1 - 17/36 Z0) W1
-              p[mu][e] := v # 8/9 Z1 - 17/36 Z0
-              g[mu][e] := t # W2
+          flowTimed(ftFermionFlow):
+            for color in 0..<nci:
+              for srct in 0..<nsrcTime:
+                for corner in 0..<ncorners:
+                  for mass in 0..<nmasses:
+                    d1p1[color][srct][corner][mass] := eps*flowLaplacian(stag1, phi1[
+                        color][srct][corner][mass], M[mass]) #Delta1
+        flowTimed(ftFlowDiagnostics): echo "d1p1[0][0][0][0].norm2: ", d1p1[0][0][0][0].norm2 # print the first element of the first d1p1 as a sanity check to make sure the flow is actually doing something to the propagators
+        flowTimed(ftGaugeFlow): gc.gaugeForce(g, f) # f is now -dS/dU at U = W1
+        flowTimed(ftGaugeFlow):
+          threads:
+            for mu in 0..<f.len:
+              for e in g[mu]:
+                var v {.noinit.}: type(load1(f[0][0]))
+                v := (-8.0/9.0)*epsnc*f[mu][e] + (-17.0/9.0)*p[mu][e] # 8/9 Z1 - 17/36 Z0
+                let t = exp(v)*g[mu][e] # exp(8/9 Z1 - 17/36 Z0) W1
+                p[mu][e] := v # 8/9 Z1 - 17/36 Z0
+                g[mu][e] := t # W2
         #fermion flow step 2&3: d2p2 = epsnc*laplace4D[g,phi2] #Delta2
         block:
           let stag2 = hisqStag(g)
           prepareFlowLinks(stag2)
-          for color in 0..<nci:
-            for srct in 0..<nsrcTime:
-              for corner in 0..<ncorners:
-                for mass in 0..<nmasses:
-                  var phi2 = newOneOf(phi0[color][srct][corner][mass])
-                  phi2 := phi0[color][srct][corner][mass] + 8.0/9.0*d1p1[color][srct][corner][mass] - 2.0/9.0*d0p0[color][srct][corner][mass]
-                  phi0[color][srct][corner][mass] := phi1[color][srct][corner][mass] + 3.0/4.0 * eps*flowLaplacian(stag2, phi2, M[mass]) #3.0/4.0 * d2p2
-        echo "phi0[0][0][0][0].norm2: ", phi0[0][0][0][0].norm2 # print the first element of the first phi2 as a sanity check to make sure the flow is actually doing something to the propagators
-        gc.gaugeForce(g, f) # f is now -dS/dU at U = W2
-        threads:
-          for mu in 0..<f.len:
-            for e in g[mu]:
-              var v {.noinit.}: type(load1(f[0][0]))
-              v := (-3.0/4.0)*epsnc*f[mu][e] - p[mu][e] #3/4 Z2 - 8/9 Z1 + 17/36 Z0
-              let t = exp(v)*g[mu][e] # exp(3/4 Z2 - 8/9 Z1 + 17/36 Z0) W2
-              g[mu][e] := t # V(t+eps)
+          flowTimed(ftFermionFlow):
+            for color in 0..<nci:
+              for srct in 0..<nsrcTime:
+                for corner in 0..<ncorners:
+                  for mass in 0..<nmasses:
+                    var phi2 = newOneOf(phi0[color][srct][corner][mass])
+                    phi2 := phi0[color][srct][corner][mass] + 8.0/9.0*d1p1[color][srct][corner][mass] - 2.0/9.0*d0p0[color][srct][corner][mass]
+                    phi0[color][srct][corner][mass] := phi1[color][srct][corner][mass] + 3.0/4.0 * eps*flowLaplacian(stag2, phi2, M[mass]) #3.0/4.0 * d2p2
+        flowTimed(ftFlowDiagnostics): echo "phi0[0][0][0][0].norm2: ", phi0[0][0][0][0].norm2 # print the first element of the first phi2 as a sanity check to make sure the flow is actually doing something to the propagators
+        flowTimed(ftGaugeFlow): gc.gaugeForce(g, f) # f is now -dS/dU at U = W2
+        flowTimed(ftGaugeFlow):
+          threads:
+            for mu in 0..<f.len:
+              for e in g[mu]:
+                var v {.noinit.}: type(load1(f[0][0]))
+                v := (-3.0/4.0)*epsnc*f[mu][e] - p[mu][e] #3/4 Z2 - 8/9 Z1 + 17/36 Z0
+                let t = exp(v)*g[mu][e] # exp(3/4 Z2 - 8/9 Z1 + 17/36 Z0) W2
+                g[mu][e] := t # V(t+eps)
       qexGC("after Runge-Kutta temporary fields")
       let wflowT {.inject.} = tau
       measure
@@ -363,7 +379,7 @@ template staggeredFlow*(u: auto; phi: auto; M: seq[float]; info: JsonNode;
       dts = info[flow].get("time-increments")
       maxFlts = info[flow].get("maximum-flow-times")
     var lastMaxFlt = 0.0
-    u.reunit
+    flowTimed(ftGaugeFlow): u.reunit
     for flowTimeInfo in zip(dts, maxFlts):
       let (dtau, tmax) = flowTimeInfo
       gc.staggeredFlow(u, phi, dtau, M):

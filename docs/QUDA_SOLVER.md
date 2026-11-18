@@ -135,13 +135,19 @@ ibrun "$QEX_BUILD_ROOT/SYCL-h100-quda/hisqflow" \
 
 Use `--solver=qex` with the same executable and inputs to select the CPU solve.
 There is no recompile between these choices. Source selection is shared by
-both solvers; use the same `--seed`, `--source-time`, and `--source-corner`
-when comparing them. The source record and source-relative time convention
+both solvers; use the same `--source`, `--sources`, `--seed`, and any
+`--source-times` / `--source-corner` overrides when comparing them. The source record and source-relative time convention
 are described in [the GPU guide](../README_GPU.md#source-position-and-reproducibility).
 A binary built without `QUDA_DIR`
 rejects `--solver=quda` before loading the configuration. Invalid solver names
 are also rejected. The application explicitly selects QEX by default, even
 though QEX's general solver-parameter defaults select QUDA when it is linked.
+
+Use `--source=random-wall --sources=N` for N full-color Z4 inversions per
+flavor, or `--source=corner-wall --sources=N` for 3N color-diluted inversions.
+Times are seeded random draws from all slices, or supplied explicitly with
+`--source-times='[0,17,63]'`. Every QUDA solve receives a true residual check.
+`--save-source` can preserve all source fields, with per-hit/color filenames. See [random-wall usage and validation](../README_GPU.md#full-color-z4-random-wall).
 
 For the initial H100 validation, use **four MPI ranks and sixteen host threads
 per rank**, with lattice rank geometry `[1,1,2,2]` on `32 x 32 x 32 x 48` and

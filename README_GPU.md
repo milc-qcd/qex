@@ -236,33 +236,134 @@ in `src/alphas/hisqflow.nim`.
 
 ### Source position and reproducibility
 
-Each run draws one time slice from `0..Nt-1` and one spatial corner from
-`0..7`, then performs three separate color inversions on that corner wall.
-The corner is `x_parity + 2*y_parity + 4*z_parity`. All MPI ranks use the
-same two draws, and the same source is retained throughout the flow.
+The source options match the CPU `hisqflowwall` driver. Add them to the
+usual gauge, lattice, flow, output, and solver arguments:
 
-Pass `--seed=12345` to reproduce the draws. The default is a clock-derived
-uint32 seed on rank 0. QEX's collective RNG seeding synchronizes the random
-stream; the draws use rejection sampling to avoid modulo bias. Either draw
-can be pinned with `--source-time=T` or `--source-corner=C`; pinning one
-keeps the other draw unchanged. `--source-time=0 --source-corner=0` selects
-the original source position. Use the same seed/overrides for CPU and QUDA
-comparisons and distinct seeds when independent configuration samples are wanted.
+```bash
+# N full-color Z4 walls: N inversions per flavor.
+--source=random-wall --sources=4 --seed=12345
 
-Before inversion, rank 0 writes
-`correlator_LABEL_CONFIGURATION.source.json` in the output directory.
-It records the seed, selected time/corner, corner origin, override flags,
-gauge filename, lattice geometry, mass, solver, and source normalization.
-Without `--output`, the record is `source_LABEL_CONFIGURATION.json` in the
-working directory. An existing source record is preserved: choose a fresh
-output directory for another run.
+# N corner placements, three separate colors each: 3N inversions per flavor.
+--source=corner-wall --sources=4 --seed=12345
 
-All correlator arrays are indexed by `dt = (sink time - source time + Nt) mod Nt`.
-Local staggered phases use the actual source origin. The thin-link A0P
-insertion now includes the antiperiodic temporal-boundary sign once, matching
-the already-phased HISQ links. Historical fixed-origin references need that
-thin-link sign correction on the last time bin; the QUDA validation script
-handles this explicitly while retaining the original reference data.
+# Explicit ordered time list, valid in either mode; N is inferred.
+--source=random-wall --source-times='[0,17,63]' --seed=12345
+```
+
+Defaults are `--source=corner-wall` and `--sources=1`. Random times are drawn
+uniformly **with replacement** from all `0..Nt-1` slices. Explicit lists must
+be nonempty integer arrays in that range; duplicates and list order are
+preserved. If `--sources` is also given, it must equal the list length.
+The older `--source-time=T` remains a one-source shorthand and cannot be
+combined with `--source-times`.
+
+Corner positions are also drawn separately for each placement. The corner is
+`x_parity + 2*y_parity + 4*z_parity`, in `0..7`; all three colors share it.
+Use `--source-corner=C` to fix this corner for every placement. A corner wall
+occupies one spatial parity class. Random walls occupy the entire slice and
+reject `--source-corner`.
+
+`--seed` is a uint32 value, including zero. If omitted, rank zero chooses a
+clock seed and broadcasts it. The RngMilc6 stream indices match the CPU driver:
+
+- Global lattice volume: rejection-sampled time draws.
+- Global lattice volume plus one: independent corner draws.
+- Global site index: Z4 noise, seeded once and advanced by three color draws
+  for every random wall at every site, including off-wall sites.
+
+The same seed, geometry, source mode, and overrides reproduce exact source
+fields across MPI layouts and OpenMP thread counts. Increasing N preserves
+the earlier sources. To replay hit k, preserve its index in a list of at
+least k+1 sources; its time alone would select hit zero's noise. Replaying
+an explicit time list with the same seed preserves the noise and corner draws; repeated random-wall times get fresh
+noise. Floating-point solver/flow reductions can differ by roundoff across
+backends. The corner RNG scheme has changed from the older interleaved
+stream-zero draws to match CPU `hisqflowwall`; to replay an older corner run,
+provide its recorded time and corner explicitly.
+
+Before inversion, rank zero writes
+`correlator_LABEL_CONFIGURATION.source.json` in the output directory (or
+`source_LABEL_CONFIGURATION.json` in the working directory without `--output`).
+It records the seed, N, ordered time/corner arrays, RNG scheme, geometry,
+configuration, solver, inversion count, and normalization. Per-field records
+are added after source generation. Existing source records are preserved;
+choose a fresh output directory for another run.
+
+Each source is contracted separately and aligned to
+`dt = (sink time - source time + Nt) mod Nt`. Corner colors are summed before
+averaging over the N placements. The usual correlator file contains the mean;
+for N > 1, `correlator_LABEL_CONFIGURATION.sources.json` also contains every
+placement's correlators. There are no contractions between different hits.
+The PP/A0P source is P; the other corner channels retain their legacy
+meson conventions. Host contractions follow each GPU flow download.
+Gauge smearing is shared across placements at each measurement, and the GPU
+flow kernels retain their existing equations. Fermion memory and work scale
+with N for random walls and 3N for corner walls.
+
+Corner mode retains all its existing meson/A0P channels and adds `PP_ss` and
+`P-P_ss` to match the CPU wall driver. The relation is
+`PP_ss(dt) = -(-1)^dt * pi_5_ss(dt)` and `P-P_ss = -PP_ss`. Corner channels
+retain their legacy color-summed normalization without a spatial-volume
+factor. Thin-link A0P includes the temporal antiperiodic sign once; the HISQ
+links already contain their boundary signs.
+
+### Full-color Z4 random wall
+
+Each random wall has independent `{1, i, -1, -i}` entries in all three color
+components at every spatial site of its time slice, and zero elsewhere.
+`--solver=quda` performs the N inversions with QUDA; SYCL evolves all resulting
+propagators together with the gauge field. The true QEX residual is checked
+after every QUDA inversion before QUDA shuts down and SYCL flow begins.
+
+Random mode outputs `PP_ss`, its negative `P-P_ss`, and real/imaginary parts of
+`A0P_thin` and `cA0P`. It divides by spatial volume and sums color. A0P uses
+the forward current; the conserved current includes the Naik contribution
+on every elementary link crossed. Corner taste phases are not used.
+
+In either mode, `--save-source=wall.qio` saves double-precision QIO fields and
+checks exact read-back before solving. One random wall retains `wall.qio`.
+Multiple random walls use `wall.source0000.qio`, etc.; corner fields use
+`wall.source0000.color0.qio`, `.color1.qio`, `.color2.qio`, etc. Existing QIO
+fields are preserved.
+
+`tests/reprod/check_wall_sources.py` checks multiple placements against the
+CPU wall driver, independently reconstructs saved fields, checks rank/thread
+and explicit-list replay, tests free and optional interacting gauge fields,
+and verifies all old corner channels with a supplied reference executable:
+
+```bash
+python3 tests/reprod/check_wall_sources.py \
+  --executable="$QEX_BUILD_ROOT/CPU/hisqflow" \
+  --reference-executable=/path/to/cpu/hisqflowwall \
+  --unit-gauge=/path/to/l8888f211b000m01m2m3a.1000.ildg \
+  --output=/path/to/new-cpu-checks
+```
+
+For H100, use the `SYCL-h100-quda/hisqflow` executable with `--solver=quda`
+and `--expect-gpu`. The validated CPU references can be reused with
+`--reference-results=/path/to/new-cpu-checks/cpu-reference` instead of
+`--reference-executable`. Pass the same optional `--interacting-gauge` to
+both runs. Run GPU checks in an allocation.
+
+For numerical regression, `tests/reprod/check_randomwall_flow.py` checks the
+source against an independent MILC6 implementation and the correlators
+against a free-HISQ Fourier solve followed by RK3 flow. It covers odd/even
+source times, MPI decomposition, clock-seed replay, fixed source time,
+source preservation errors, and an optional corner-wall regression.
+Run it in a compute allocation with NumPy and a unit `8^4` gauge fixture:
+
+```bash
+python3 tests/reprod/check_randomwall_flow.py \
+  --executable="$QEX_BUILD_ROOT/CPU/hisqflow" \
+  --unit-gauge=/path/to/l8888f211b000m01m2m3a.1000.ildg \
+  --output=/path/to/new-check-directory
+```
+
+Use the `SYCL-h100-quda/hisqflow` executable and `--solver=quda` for the same
+checks on H100. The fixture's `m2` token selects mass `0.2`. The generator is
+`tests/backend/make_randomwall_unit.nim`; build it with
+`QUDA_DIR= ./scripts/build-hisq-sycl.sh CPU make_randomwall_unit` and run the resulting
+executable with the fixture filename as its only argument inside an allocation.
 
 ## 6. Run the full flow with Slurm on Stampede3
 
@@ -344,6 +445,8 @@ For the example above, `$out` contains:
 
 - `correlator_C0p0_1000`: correlators in JSON format.
 - `gaugeobs_C0p0_1000`: gauge observables in JSON format.
+- `timing_C0p0_1000.json`: phase timings with MPI rank min/mean/max seconds
+  and segment counts.
 - `run.log`: device selection, solver/flow messages, and application elapsed time.
 - `resource-usage.txt`: GNU time statistics; its RSS is not necessarily the sum
   of all MPI ranks and does not measure GPU memory.
@@ -371,6 +474,54 @@ the recorded configuration 1000 tests. They require a prepared validation
 directory with frozen binaries, inputs, reference files, checksum manifest,
 and `validate_output.py`; they are not standalone launchers from a fresh clone.
 The H100 comparison job additionally samples GPU memory once per second.
+
+### Phase timings
+
+Every `hisqflow` run writes `timing_LABEL_CONFIGURATION.json` alongside its
+ordinary output, and prints a `FLOW_TIMING` summary. No extra option is needed.
+The report follows the CPU `hisqflowwall` format: monotonic wall-clock seconds,
+exclusive phases, and min/mean/max across MPI ranks. It records the backend,
+solver, configuration, source mode/count, number of solution fields, and seed.
+
+The shared CPU/GPU phases are `gauge_flow`, `fermion_flow`, `contractions`,
+`solve`, `hisq_links_flow`, `hisq_links_solve`, `hisq_links_contractions`,
+`gauge_measurements`, `flow_diagnostics`, `source_generation`, `source_io`,
+`gauge_input`, and `output_io`. Flow HISQ construction covers all three RK
+stages and is shared by the sources. Fermion flow and solve times include all
+N random-wall or 3N corner-wall fields; contractions include source averaging.
+HISQ construction is excluded from the solve, flow-arithmetic, and contraction
+phases so it is not counted twice.
+
+The accelerator driver also separates these costs:
+
+| Phase | Work included |
+| --- | --- |
+| `flow_setup` | Persistent flow workspaces, halo plans, allocation, initial host copies, and cleanup. |
+| `flow_download` | Explicit full-field snapshots and copies for CPU measurements. |
+| `solve_verification` | QEX true-residual checks after QUDA solves. |
+| `solver_cleanup` | QUDA shutdown after the solves. |
+
+These are elapsed application times, including CPU work, communication, and
+device waits. The current SYCL kernel and copy wrappers wait before returning,
+and QUDA returns a completed host solution. Timers therefore include completed
+device work without adding queue waits or MPI barriers. They are not isolated
+GPU kernel times. Lazy uploads and halo transfers remain in the phase that
+requests them; `flow_download` does not represent all data transfer.
+
+The total starts immediately after `qexInit` and ends after ordinary output.
+It excludes timing-report generation/writing and `qexFinalize`. `other`
+accounts for remaining setup, bookkeeping, logging, garbage collection, and
+timer overhead. Phase **rank means**, including `other`, sum to the total
+rank mean. Phase maxima can belong to different ranks and must not be added
+to obtain wall time. Use total rank maximum for the slowest rank's elapsed
+time. CPU fallback work buffers are counted within its flow phases, while the
+coupled implementation reports persistent workspace costs in `flow_setup`.
+
+[`check_flow_timings.py`](tests/reprod/check_flow_timings.py) checks phase
+coverage/counts, rank statistics, accounting, and numerical agreement with
+an untimed executable on small unit and interacting gauge fields. It also
+checks timing reports from a completed `check_wall_sources.py` run using
+`--results=PATH --backend=SYCL --solver=quda`.
 
 ## Validation record and troubleshooting
 

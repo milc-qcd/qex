@@ -1,6 +1,7 @@
 ## Persistent coupled RK3 flow. CPU code controls stages and MPI; all gauge,
 ## HISQ-link and fermion arithmetic executes through the selected backend.
 import qex
+import flowTimings
 import hisqflowgpu, gaugeflowgpu
 export hisqflowgpu, gaugeflowgpu
 
@@ -11,6 +12,8 @@ type CoupledFlowGpu*[G,S,F] = ref object
   closed: bool
 
 proc newCoupledFlowGpu*(g, sources: auto, coefficients: GaugeActionCoeffs): auto =
+  let phaseStart = flowTimerStart()
+  defer: flowTimerStop(ftFlowSetup, phaseStart)
   doAssert sources.len > 0
   let gauge = newGaugeFlowGpu(g, coefficients)
   let stencil = newHisqFlowGpu(g, sources[0])
@@ -36,33 +39,41 @@ proc step*(w: CoupledFlowGpu, eps: float) =
   doAssert not w.closed
   tic("GPU coupled RK step")
   # W0: retain L0*phi0 unscaled, and form phi1 = phi0 + eps/4 L0*phi0.
-  w.gauge.smear()
-  w.stencil.updateDeviceLinks(w.gauge.fat)
-  w.gauge.gaugeForce()
-  for k in 0..<w.phi.len:
-    w.stencil.laplacianInto(w.delta0[k], w.phi[k])
-    deviceCombine(w.stage1[k], 1.0,w.phi[k], 0.25*eps,w.delta0[k], 0.0,w.phi[k])
-  w.gauge.advance(0,eps)
+  flowTimed(ftHisqLinksFlow):
+    w.gauge.smear()
+    w.stencil.updateDeviceLinks(w.gauge.fat)
+  flowTimed(ftGaugeFlow): w.gauge.gaugeForce()
+  flowTimed(ftFermionFlow):
+    for k in 0..<w.phi.len:
+      w.stencil.laplacianInto(w.delta0[k], w.phi[k])
+      deviceCombine(w.stage1[k], 1.0,w.phi[k], 0.25*eps,w.delta0[k], 0.0,w.phi[k])
+  flowTimed(ftGaugeFlow): w.gauge.advance(0,eps)
   # W1: form phi2 using both first and second derivatives.
-  w.gauge.smear()
-  w.stencil.updateDeviceLinks(w.gauge.fat)
-  for k in 0..<w.phi.len:
-    w.stencil.laplacianInto(w.delta1[k], w.stage1[k])
-    deviceCombine(w.work[k], 1.0,w.phi[k], (8.0/9.0)*eps,w.delta1[k],
-                  (-2.0/9.0)*eps,w.delta0[k])
-  w.gauge.gaugeForce()
-  w.gauge.advance(1,eps)
+  flowTimed(ftHisqLinksFlow):
+    w.gauge.smear()
+    w.stencil.updateDeviceLinks(w.gauge.fat)
+  flowTimed(ftFermionFlow):
+    for k in 0..<w.phi.len:
+      w.stencil.laplacianInto(w.delta1[k], w.stage1[k])
+      deviceCombine(w.work[k], 1.0,w.phi[k], (8.0/9.0)*eps,w.delta1[k],
+                    (-2.0/9.0)*eps,w.delta0[k])
+  flowTimed(ftGaugeFlow): w.gauge.gaugeForce()
+  flowTimed(ftGaugeFlow): w.gauge.advance(1,eps)
   # W2: delta0 is no longer needed, so reuse it for L2*phi2.
-  w.gauge.smear()
-  w.stencil.updateDeviceLinks(w.gauge.fat)
-  for k in 0..<w.phi.len:
-    w.stencil.laplacianInto(w.delta0[k], w.work[k])
-    deviceCombine(w.phi[k], 1.0,w.stage1[k], 0.75*eps,w.delta0[k], 0.0,w.stage1[k])
-  w.gauge.gaugeForce()
-  w.gauge.advance(2,eps)
+  flowTimed(ftHisqLinksFlow):
+    w.gauge.smear()
+    w.stencil.updateDeviceLinks(w.gauge.fat)
+  flowTimed(ftFermionFlow):
+    for k in 0..<w.phi.len:
+      w.stencil.laplacianInto(w.delta0[k], w.work[k])
+      deviceCombine(w.phi[k], 1.0,w.stage1[k], 0.75*eps,w.delta0[k], 0.0,w.stage1[k])
+  flowTimed(ftGaugeFlow): w.gauge.gaugeForce()
+  flowTimed(ftGaugeFlow): w.gauge.advance(2,eps)
   toc("GPU coupled RK step done")
 
 proc download*(w: CoupledFlowGpu, gauge, sources: auto) =
+  let phaseStart = flowTimerStart()
+  defer: flowTimerStop(ftFlowDownload, phaseStart)
   ## Explicit snapshot for the existing CPU measurement/output interface.
   doAssert not w.closed and sources.len == w.phi.len
   w.gauge.downloadGauge(gauge)
@@ -71,6 +82,8 @@ proc download*(w: CoupledFlowGpu, gauge, sources: auto) =
     threads: sources[k] := w.phi[k]
 
 proc free*(w: CoupledFlowGpu) =
+  let phaseStart = flowTimerStart()
+  defer: flowTimerStop(ftFlowSetup, phaseStart)
   if w.closed: return
   w.gauge.free()
   w.stencil.free()
